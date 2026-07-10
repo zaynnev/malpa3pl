@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.0.0
-// @match        https://malpa.canary7.com/*
+// @version      1.0.1
+// @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @grant        none
@@ -44,8 +44,11 @@
   // 0. CONSTANTS  (build guide §4/§5 — confirm production values before rollout)
   // ===========================================================================
 
-  const HOST             = 'https://malpa.canary7.com';
-  const API_BASE         = HOST + '/index.php?r=';
+  // API host: same as Malpa Pick v4.8.9 / Pack v3.3.78. On production the UI at
+  // malpa.canary7.com is a static Angular app (S3/CloudFront — calling index.php
+  // there returns an XML AccessDenied 403); the Canary7 API itself is served from
+  // stgauth.canary7.com, which is what both proven sibling scripts call.
+  const API_BASE         = 'https://stgauth.canary7.com/index.php?r=';
   const WAREHOUSE_ID     = 10;      // guide §5 — HAR shows 10; CONFIRM for production
   const PACK_LOCATION_ID = 72037;   // guide §3 D5 / §5 — packing/close location (code WDD-02); per-station constant, CONFIRM
 
