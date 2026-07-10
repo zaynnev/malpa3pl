@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.0.1
+// @version      1.0.2
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -456,14 +456,15 @@
   async function loadShipment(shipmentNumber) {
     const enc = encShip(shipmentNumber);
     const expand = [
+      'shipmentHeader',
       'item.itemUnitOfMeasures.unitOfMeasure',
       'item.itemUnitOfMeasures.itemUnitOfMeasureReference',
-      'leadingStatusDescription',
     ].join(',');
     const fields = [
-      'id', 'quantity', 'original_qty', 'leading_status_id',
+      'id', 'quantity', 'original_qty',
       'shipment_header.id', 'shipment_header.shipment_number',
-      'leadingStatus', 'item.id', 'item.item_code', 'item.description',
+      'shipment_header.leading_status_id',
+      'item.id', 'item.item_code', 'item.description',
       'item.itemUnitOfMeasures.id', 'item.itemUnitOfMeasures.factor',
       'item.itemUnitOfMeasures.weight', 'item.itemUnitOfMeasures.unitOfMeasure.name',
       'item.itemUnitOfMeasures.itemUnitOfMeasureReference.reference',
@@ -476,15 +477,20 @@
     const lines = Array.isArray(data) ? data : (data?.items || []);
     if (!lines.length) { const e = new Error('Shipment not found.'); e.code = 'NOT_FOUND'; throw e; }
 
-    // Guard: every line must be Pack Pending (status 5) — guide §7/§15
-    const statusOf = (ln) =>
-      ln.leading_status_id ?? ln.leadingStatus?.id ?? ln.leadingStatus ?? ln.leadingStatusDescription?.id;
-    const bad = lines.find(ln => Number(statusOf(ln)) !== 5);
-    if (bad) {
-      const e = new Error('Shipment is not Pack Pending (status 5). Cannot load.');
+    // Guard on the SHIPMENT-HEADER leading status (the authoritative "Pack Pending"
+    // signal — guide §7/§15). Detail rows don't reliably carry a leading status, so
+    // reading it per-line gave false negatives. Only block when we can POSITIVELY
+    // read a status that isn't 5; if it's absent, proceed rather than false-block.
+    const hdr = lines[0].shipment_header || {};
+    const rawStatus = hdr.leading_status_id ?? hdr.leadingStatus?.id ?? hdr.leadingStatus;
+    const status = (rawStatus === undefined || rawStatus === null || rawStatus === '')
+      ? null : Number(rawStatus);
+    if (status !== null && status !== 5) {
+      const e = new Error(`Shipment is not Pack Pending — current status ${status}. Cannot load.`);
       e.code = 'BAD_STATUS';
       throw e;
     }
+    if (status === null) WARN('Could not read shipment leading status from detail response — proceeding.');
 
     // Build the blind cache (guide §8)
     Cache.reset();
