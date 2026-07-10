@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.0.2
+// @version      1.1.0
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -173,11 +173,9 @@
     banner.className = 'mpp-overlay';
     banner.innerHTML = `
       <div class="mpp-modal" style="text-align:center">
-        <div style="font-size:20px;font-weight:700;color:#fff">🔒 Session Expired</div>
-        <div style="font-size:13px;color:rgba(255,255,255,.75);line-height:1.5;margin:10px 0 4px">
-          Your C7 session has timed out.<br>Log back in to continue packing.
-        </div>
-        <button id="mpp-session-dismiss" class="mpp-btn mpp-btn-primary" style="margin-top:12px">Dismiss</button>
+        <div class="mpp-modal-title" style="text-align:center">🔒 Session Expired</div>
+        <div class="mpp-note">Your C7 session has timed out.<br>Log back in to continue packing.</div>
+        <button id="mpp-session-dismiss" class="mpp-btn mpp-btn-primary" style="margin-top:4px">Dismiss</button>
       </div>`;
     root.appendChild(banner);
     document.getElementById('mpp-session-dismiss')?.addEventListener('click', () => {
@@ -604,13 +602,33 @@
     overlay.id = 'mpp-root';
     overlay.className = 'mpp-root';
     document.body.appendChild(overlay);
+    positionRoot();
+    window.addEventListener('resize', positionRoot);
     document.addEventListener('keydown', onGlobalKey, true);
     if (!State.profiles.length) { initData(); renderProfileSelect('Loading profiles…'); }
     else renderProfileSelect();
   }
 
+  // Fill the C7 main content area like a native tab (matches Pack's positionTabView):
+  // top = bottom of the C7 tab bar, left = right edge of the sidebar. Falls back to
+  // full-screen when those chrome elements aren't present (e.g. collapsed TC51 layout).
+  function positionRoot() {
+    const r = document.getElementById('mpp-root');
+    if (!r) return;
+    const sidebar = document.querySelector('div.sidebar, .sidebar');
+    const tabBar  = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+    let top = 0, left = 0;
+    if (tabBar)  { const b = tabBar.getBoundingClientRect();  if (b.bottom > 0 && b.bottom < window.innerHeight) top  = Math.round(b.bottom); }
+    if (sidebar) { const b = sidebar.getBoundingClientRect(); if (b.right  > 0 && b.right  < window.innerWidth)  left = Math.round(b.right); }
+    r.style.top = top + 'px';
+    r.style.left = left + 'px';
+    r.style.right = '0px';
+    r.style.bottom = '0px';
+  }
+
   function closeUI() {
     document.removeEventListener('keydown', onGlobalKey, true);
+    window.removeEventListener('resize', positionRoot);
     document.getElementById('mpp-root')?.remove();
     resetAll();
   }
@@ -1008,7 +1026,7 @@
     modal.className = 'mpp-overlay';
     modal.innerHTML = `
       <div class="mpp-modal">
-        <div class="mpp-modal-title" style="color:#ff6b6b">✕ Verification failed</div>
+        <div class="mpp-modal-title" style="color:var(--c7-red)">✕ Verification failed</div>
         <div class="mpp-note">Differences (nothing has been committed):</div>
         <div class="mpp-vs-list">${rows.join('')}${un.join('')}</div>
         <button class="mpp-btn mpp-btn-primary" id="mpp-mm-ok">Reset &amp; rescan</button>
@@ -1248,8 +1266,8 @@
     r.innerHTML = `
       ${header('Pallet Pack', 'Commit error')}
       <div class="mpp-body mpp-center">
-        <div class="mpp-big-tick" style="color:#ff6b6b">!</div>
-        <div class="mpp-success-title" style="color:#ff6b6b">Couldn't finish packing</div>
+        <div class="mpp-big-tick" style="color:var(--c7-red)">!</div>
+        <div class="mpp-success-title" style="color:var(--c7-red)">Couldn't finish packing</div>
         <div class="mpp-note">${_esc(err.message || 'Unknown error')}</div>
         <div class="mpp-note">Nothing was reset. You can retry the commit.</div>
         <button id="mpp-retry-btn" class="mpp-btn mpp-btn-primary mpp-btn-lg">Retry commit</button>
@@ -1346,64 +1364,103 @@
     const style = document.createElement('style');
     style.id = 'mpp-styles';
     style.textContent = `
-      .mpp-root{position:fixed;inset:0;z-index:99998;background:#0f1720;color:#e7edf5;
-        font-family:Roboto,'Segoe UI',sans-serif;display:flex;flex-direction:column;overflow:hidden}
+      /* Canary7-matched design tokens (same palette as Malpa Pack v3) — scoped to
+         our root so we never touch C7's own :root variables. */
+      .mpp-root{
+        --c7-bg:#eef1f5; --c7-surf:#ffffff; --c7-surf2:#f9f9fa; --c7-surf3:#eef9fd;
+        --c7-border:#e1e6ef; --c7-border2:#c0cadd; --c7-text:#394967;
+        --c7-muted:#9faecb; --c7-muted2:#6b7280; --c7-teal:#2ea8d6; --c7-amber:#fabb3d;
+        --c7-green:#79c447; --c7-green-bg:#eff9eb; --c7-green-bd:#bde5ae; --c7-red:#ff5454;
+        --c7-font:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;
+        --c7-mono:'SF Mono','Fira Code',Consolas,monospace; --c7-r:4px;
+        position:fixed; z-index:100; background:var(--c7-surf2); color:var(--c7-text);
+        font-family:var(--c7-font); display:flex; flex-direction:column; overflow:hidden;
+        animation:mpp-in .12s ease;
+      }
+      @keyframes mpp-in{from{opacity:0}to{opacity:1}}
+      /* ── titlebar (C7 tab look) ── */
       .mpp-header{display:flex;align-items:center;justify-content:space-between;
-        padding:12px 16px;background:#152233;border-bottom:1px solid #22303f}
-      .mpp-title{font-size:18px;font-weight:700}
-      .mpp-subtitle{font-size:12px;color:#9fb0c4;margin-top:2px}
-      .mpp-x{background:none;border:none;color:#9fb0c4;font-size:20px;cursor:pointer;padding:4px 8px}
-      .mpp-body{flex:1;overflow-y:auto;padding:18px 16px;display:flex;flex-direction:column;gap:12px}
+        background:var(--c7-surf);border-bottom:1px solid var(--c7-border);
+        min-height:44px;padding:6px 12px 6px 16px;flex-shrink:0;
+        box-shadow:inset 0 -2px 0 var(--mp-brand,#6fc3eb)}
+      .mpp-header>div:first-child{min-width:0;flex:1}
+      .mpp-title{font-size:17px;font-weight:600;color:var(--c7-text)}
+      .mpp-subtitle{font-size:13px;color:var(--c7-muted);margin-top:2px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .mpp-x{background:none;border:none;color:var(--c7-muted2);font-size:20px;cursor:pointer;
+        padding:2px 6px;border-radius:3px;line-height:1;transition:color .1s,background .1s}
+      .mpp-x:hover{color:var(--c7-text);background:var(--c7-surf3)}
+      /* ── body ── */
+      .mpp-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:14px;background:var(--c7-surf)}
+      .mpp-body::-webkit-scrollbar{width:6px}
+      .mpp-body::-webkit-scrollbar-thumb{background:var(--c7-border2);border-radius:3px}
       .mpp-center{align-items:center;justify-content:center;text-align:center}
-      .mpp-label{font-size:12px;color:#9fb0c4;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
-      .mpp-input,.mpp-select{width:100%;box-sizing:border-box;padding:12px;font-size:16px;
-        background:#0b131c;border:1px solid #2a3a4d;border-radius:6px;color:#e7edf5}
-      .mpp-select{appearance:auto}
-      .mpp-btn{padding:12px 16px;font-size:15px;font-weight:600;border:none;border-radius:6px;
-        cursor:pointer;font-family:inherit;color:#fff}
-      .mpp-btn-lg{padding:15px;font-size:16px}
-      .mpp-btn-primary{background:#20a8d8}
-      .mpp-btn-secondary{background:#3a5069}
-      .mpp-btn-ghost{background:transparent;border:1px solid #2a3a4d;color:#9fb0c4}
-      .mpp-btn:disabled{opacity:.5;cursor:not-allowed}
-      .mpp-note{font-size:13px;color:#9fb0c4;line-height:1.5}
-      .mpp-fb{font-size:13px;min-height:18px}
-      .mpp-fb.ok{color:#79c447}.mpp-fb.err{color:#ff6b6b}.mpp-fb.dim{color:#9fb0c4}
+      /* ── labels / inputs / selects ── */
+      .mpp-label{font-size:15px;font-weight:700;letter-spacing:1px;text-transform:uppercase;
+        color:var(--c7-text);display:block;margin-bottom:4px}
+      .mpp-input,.mpp-select{width:100%;box-sizing:border-box;background:var(--c7-bg);
+        border:1px solid var(--c7-border2);border-radius:var(--c7-r);color:var(--c7-text);
+        font-family:var(--c7-font);font-size:22px;padding:14px 16px;min-height:54px;outline:none;
+        transition:border-color .12s}
+      .mpp-input:focus,.mpp-select:focus{border-color:var(--c7-teal)}
+      .mpp-input::placeholder{color:var(--c7-muted)}
+      .mpp-select{font-size:18px}
+      .mpp-grid2 .mpp-input{font-size:18px;padding:12px;min-height:48px}
+      /* ── buttons ── */
+      .mpp-btn{border:none;border-radius:var(--c7-r);cursor:pointer;font-family:var(--c7-font);
+        font-weight:600;font-size:17px;padding:0 14px;min-height:54px;min-width:0;color:#fff;
+        display:flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap;
+        overflow:hidden;text-overflow:ellipsis;transition:background .1s,opacity .1s}
+      .mpp-btn-lg{font-size:21px;min-height:58px}
+      .mpp-btn-primary{background:var(--c7-teal)}
+      .mpp-btn-primary:hover:not(:disabled){background:#1985ac}
+      .mpp-btn-secondary{background:var(--c7-amber);color:#173140}
+      .mpp-btn-secondary:hover:not(:disabled){background:#e9a92f}
+      .mpp-btn-ghost{background:var(--c7-surf3);color:var(--c7-text);border:1px solid var(--c7-border2)}
+      .mpp-btn-ghost:hover:not(:disabled){background:#e2f2fb}
+      .mpp-btn:disabled{opacity:.4;cursor:not-allowed;pointer-events:none}
+      /* ── notes / feedback ── */
+      .mpp-note{font-size:15px;color:var(--c7-muted);line-height:1.5}
+      .mpp-fb{font-size:15px;min-height:20px}
+      .mpp-fb.ok{color:var(--c7-green)}.mpp-fb.err{color:var(--c7-red)}.mpp-fb.dim{color:var(--c7-muted)}
       .mpp-grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-      /* scan screen */
-      .mpp-scan-body{gap:14px}
-      .mpp-container-badge{align-self:center;background:#1c3a52;padding:6px 16px;
-        border-radius:20px;font-weight:700;font-size:14px;color:#7fd3f2}
-      .mpp-scan-zone{position:relative;border:2px dashed #2a4a63;border-radius:12px;
-        padding:34px 16px;text-align:center;background:#0b131c;transition:background .1s}
-      .mpp-scan-zone.mpp-flash{background:#12324a}
-      .mpp-scan-zone-label{font-size:16px;font-weight:700;color:#cfe0f0}
-      .mpp-scan-arrows{font-size:26px;color:#2f6d93;letter-spacing:4px;margin-top:6px}
+      .mpp-grid2>*{min-width:0}
+      /* ── scan screen ── */
+      .mpp-scan-body{gap:16px}
+      .mpp-container-badge{align-self:center;background:var(--c7-surf3);border:1px solid var(--c7-border);
+        padding:8px 18px;border-radius:20px;font-weight:700;font-size:16px;color:var(--c7-teal)}
+      .mpp-scan-zone{position:relative;border:2px dashed var(--c7-border2);border-radius:8px;
+        padding:40px 16px;text-align:center;background:var(--c7-bg);transition:background .12s,border-color .12s}
+      .mpp-scan-zone.mpp-flash{background:var(--c7-green-bg);border-color:var(--c7-green-bd)}
+      .mpp-scan-zone-label{font-size:20px;font-weight:700;color:var(--c7-text)}
+      .mpp-scan-arrows{font-size:28px;color:var(--c7-teal);letter-spacing:4px;margin-top:8px}
       .mpp-scan{position:absolute;opacity:0;left:0;top:0;width:1px;height:1px;border:0;padding:0}
       input.mpp-scan.mpp-input{position:static;opacity:1;width:100%;height:auto}
       .mpp-scan-meta{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
-      .mpp-meta-pill{background:#152233;border:1px solid #22303f;border-radius:16px;
-        padding:6px 12px;font-size:12px;color:#9fb0c4}
+      .mpp-meta-pill{background:var(--c7-surf2);border:1px solid var(--c7-border);border-radius:16px;
+        padding:8px 14px;font-size:14px;color:var(--c7-muted2)}
       .mpp-scan-actions{display:flex;flex-direction:column;gap:10px;margin-top:auto}
-      /* overlay + modal */
-      .mpp-overlay{position:absolute;inset:0;z-index:10;background:rgba(4,9,14,.82);
+      /* ── overlay + modal (light) ── */
+      .mpp-overlay{position:absolute;inset:0;z-index:10;background:rgba(57,73,103,.45);
         display:flex;align-items:center;justify-content:center;padding:16px}
-      .mpp-modal{width:100%;max-width:420px;max-height:90%;overflow-y:auto;background:#152233;
-        border:1px solid #2a3a4d;border-radius:12px;padding:18px;display:flex;flex-direction:column;gap:10px}
-      .mpp-modal-title{font-size:17px;font-weight:700}
-      .mpp-vs-list{display:flex;flex-direction:column;gap:6px;margin:4px 0}
-      .mpp-vs-row{display:flex;justify-content:space-between;gap:10px;font-size:13px;
-        padding:8px 10px;background:#0b131c;border-radius:6px}
-      .mpp-vs-bad{border-left:3px solid #ff6b6b}
-      /* success / error */
-      .mpp-big-tick{font-size:64px;color:#79c447;font-weight:700;line-height:1}
-      .mpp-success-title{font-size:20px;font-weight:700}
-      .mpp-spinner{width:44px;height:44px;border:4px solid #22303f;border-top-color:#20a8d8;
+      .mpp-modal{width:100%;max-width:440px;max-height:92%;overflow:hidden auto;background:var(--c7-surf);
+        border:1px solid var(--c7-border2);border-radius:8px;padding:18px;box-sizing:border-box;
+        display:flex;flex-direction:column;gap:12px;box-shadow:0 12px 40px rgba(57,73,103,.25)}
+      .mpp-modal-title{font-size:19px;font-weight:700;color:var(--c7-text)}
+      .mpp-vs-list{display:flex;flex-direction:column;gap:6px;margin:2px 0}
+      .mpp-vs-row{display:flex;justify-content:space-between;gap:10px;font-size:15px;
+        padding:10px 12px;background:var(--c7-bg);border-radius:var(--c7-r);color:var(--c7-text)}
+      .mpp-vs-bad{border-left:3px solid var(--c7-red);background:#fff3f3}
+      /* ── success / error ── */
+      .mpp-big-tick{font-size:64px;color:var(--c7-green);font-weight:700;line-height:1}
+      .mpp-success-title{font-size:22px;font-weight:700;color:var(--c7-text)}
+      .mpp-spinner{width:44px;height:44px;border:4px solid var(--c7-border);border-top-color:var(--c7-teal);
         border-radius:50%;animation:mpp-spin .8s linear infinite}
       @keyframes mpp-spin{to{transform:rotate(360deg)}}
+      /* ── toast ── */
       .mpp-toast{position:absolute;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
-        background:#22303f;color:#e7edf5;padding:12px 18px;border-radius:8px;font-size:14px;
-        opacity:0;transition:.25s;z-index:20;max-width:90%}
+        background:var(--c7-text);color:#fff;padding:12px 18px;border-radius:8px;font-size:15px;
+        opacity:0;transition:.25s;z-index:20;max-width:90%;box-shadow:0 8px 24px rgba(0,0,0,.25)}
       .mpp-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
       #mpp-nav .mpp-nav-label{vertical-align:middle}
     `;
