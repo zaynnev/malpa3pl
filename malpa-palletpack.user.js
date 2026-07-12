@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.1
+// @version      1.2.2
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -627,6 +627,11 @@
   }
   function _stopTabObserver() { if (_mppTabObserver) { _mppTabObserver.disconnect(); _mppTabObserver = null; } }
 
+  // TC51 sidebar state — remembered on open, restored on close (mirrors Pick).
+  let _mppSidebarRO = null;
+  let _mppSidebarWasMin = false;
+  let _mppBrandWasMin = false;
+
   function openUI() {
     // Already open — just re-show/re-activate our tab (view may be hidden because
     // the operator clicked another C7 tab).
@@ -636,9 +641,27 @@
     overlay.id = 'mpp-root';
     overlay.className = 'mpp-root';
     document.body.appendChild(overlay);
+
+    // Minimise the C7 sidebar on open so the window fills the screen; store its prior
+    // state so closeUI() only undoes what we changed (mirrors malpa-pick.user.js).
+    _mppSidebarWasMin = document.body.classList.contains('sidebar-minimized');
+    _mppBrandWasMin   = document.body.classList.contains('brand-minimized');
+    document.body.classList.add('sidebar-minimized', 'brand-minimized');
+
     insertTabChip();
     positionRoot();
     window.addEventListener('resize', positionRoot);
+
+    // THE FIX: collapsing/expanding the sidebar is a body-class toggle that never emits
+    // window.resize, so positionRoot used to keep a stale left offset (a gap on the
+    // TC51). Watch the sidebar box directly — the ResizeObserver fires as it animates.
+    const sidebarEl = document.querySelector('div.sidebar, .sidebar');
+    if (sidebarEl && 'ResizeObserver' in window) {
+      _mppSidebarRO = new ResizeObserver(() => positionRoot());
+      _mppSidebarRO.observe(sidebarEl);
+    }
+    setTimeout(positionRoot, 60);   // belt-and-braces once the collapse settles
+
     document.addEventListener('keydown', onGlobalKey, true);
     _mppViewVisible = true;
     if (!State.profiles.length) { initData(); renderProfileSelect('Loading profiles…'); }
@@ -747,6 +770,10 @@
   function closeUI() {
     document.removeEventListener('keydown', onGlobalKey, true);
     window.removeEventListener('resize', positionRoot);
+    if (_mppSidebarRO) { _mppSidebarRO.disconnect(); _mppSidebarRO = null; }
+    // Restore the sidebar to its pre-open state — only undo classes we added.
+    if (!_mppSidebarWasMin) document.body.classList.remove('sidebar-minimized');
+    if (!_mppBrandWasMin)   document.body.classList.remove('brand-minimized');
     removeTabChip();
     document.getElementById('mpp-root')?.remove();
     _mppViewVisible = false;
