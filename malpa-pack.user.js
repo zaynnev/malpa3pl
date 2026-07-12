@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pack v3
 // @namespace    https://malpa.canary7.com
-// @version      3.3.79
+// @version      3.3.78
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pack.user.js
 // @description  High-throughput packing station for Canary7 WMS — optimistic scanning, async API queue, dynamic profiles
@@ -3449,31 +3449,8 @@ color: #b91c1c;
 
     // Inject view into body — fixed positioned overlay
     document.body.appendChild(view);
-
-    // ── TC51 sidebar handling (mirrors malpa-pick.user.js buildShell) ───────
-    // Minimise the C7 sidebar on open so the overlay fills the screen; remember
-    // its prior state so closeUI() only undoes what we changed.
-    window._mpSidebarWasMinimized = document.body.classList.contains('sidebar-minimized');
-    window._mpBrandWasMinimized   = document.body.classList.contains('brand-minimized');
-    document.body.classList.add('sidebar-minimized', 'brand-minimized');
-
     positionTabView(view);
-
-    // Named reposition handler stored on window so closeUI() can remove it — the
-    // previous anonymous arrow leaked a listener on every open/close cycle.
-    window._mpReposition = () => positionTabView(view);
-    window.addEventListener('resize', window._mpReposition);
-
-    // THE FIX: collapsing/expanding the sidebar is a body-class toggle that never
-    // emits window.resize, so positionTabView used to keep a stale left offset.
-    // Watch the sidebar box directly — the ResizeObserver fires as it animates.
-    const _mpSidebarEl = document.querySelector('div.sidebar, .sidebar');
-    if (_mpSidebarEl && 'ResizeObserver' in window) {
-      window._mpSidebarRO = new ResizeObserver(() => window._mpReposition());
-      window._mpSidebarRO.observe(_mpSidebarEl);
-    }
-    // Belt-and-braces: reposition once more after the collapse animation settles.
-    setTimeout(() => positionTabView(view), 60);
+    window.addEventListener('resize', () => positionTabView(view));
 
     // Activate our tab in the tab bar
     activateMalpaTab();
@@ -5502,12 +5479,6 @@ color: #b91c1c;
     document.removeEventListener('keydown', onGlobalKey);
     if (window._mpTabPoll) { clearInterval(window._mpTabPoll); window._mpTabPoll = null; }
     if (window._mpTabObserver) { window._mpTabObserver.disconnect(); window._mpTabObserver = null; }
-    // Remove the reposition listener + sidebar observer added in buildShell.
-    if (window._mpReposition) { window.removeEventListener('resize', window._mpReposition); window._mpReposition = null; }
-    if (window._mpSidebarRO) { window._mpSidebarRO.disconnect(); window._mpSidebarRO = null; }
-    // Restore the sidebar to its pre-open state — only undo classes we added.
-    if (!window._mpSidebarWasMinimized) document.body.classList.remove('sidebar-minimized');
-    if (!window._mpBrandWasMinimized)   document.body.classList.remove('brand-minimized');
     clearInterval(_queuePollInterval);
     R.overlay && R.overlay.remove();
     document.getElementById('mp-tab-li')?.remove();
