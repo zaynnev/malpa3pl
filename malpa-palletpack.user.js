@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.3
+// @version      1.2.4
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -1190,25 +1190,31 @@
         `&profile=${State.profile.id}&expand=${PP_GPC_EXPAND}`
       );
       const gpcContainers = Array.isArray(gpcRaw) ? gpcRaw : [gpcRaw];
-      const src = gpcContainers[0] || {};
-      const consignmentId   = src.consignment_id;
+      // get-pack-container returns EVERY container on the shipment, not just the tote
+      // we asked for — including already-packed (status-7) pieces from earlier boxes.
+      // Only the source tote (the status-5 container we resolved) holds children still
+      // to pack; using the others moved already-closed children and corrupted the close.
+      const src = gpcContainers.find(c =>
+        String(c.container_no) === String(source.container_no)) || gpcContainers[0] || {};
+      const consignmentId    = src.consignment_id;
       const jobInstructionId = src.job_instruction_id;
 
-      // Build remaining[item_id] = [ {childId, qtyBase, qtyUom, factor, uomId} ] (guide §8/§12)
+      // Build remaining[item_id] = [ {childId, qtyBase, uomId} ] from the SOURCE tote's
+      // still-open children only (guide §8/§12).
+      // NOTE: C7 stores shipmentDetailChild.quantity in BASE units regardless of the
+      // child's UOM (confirmed from a pack HAR: a Carton-UOM child of 25 + siblings
+      // 11 + 30 summed to the detail's base qty of 66). Likewise pack-short-v2's
+      // short_quantity is base units. So we do NOT multiply by the UOM factor here —
+      // doing so previously inflated Carton children ×factor and left units unpacked.
       const remaining = new Map();
-      for (const c of gpcContainers) {
-        for (const child of (c.shipmentDetailChildren || [])) {
-          const item = child.shipmentDetail?.item || {};
-          const itemId = item.id ?? item.item_code;
-          if (itemId == null) continue;
-          const uomId = child.item_unit_of_measure_id ?? child.itemUnitOfMeasure?.id;
-          const factor = resolveChildFactor(item, uomId, child);
-          const qtyUom = num(child.quantity);
-          if (!remaining.has(itemId)) remaining.set(itemId, []);
-          remaining.get(itemId).push({
-            childId: child.id, qtyUom, factor, uomId, qtyBase: qtyUom * factor,
-          });
-        }
+      for (const child of (src.shipmentDetailChildren || [])) {
+        if (Number(child.status_id) === 7) continue;          // already packed — never touch
+        const item = child.shipmentDetail?.item || {};
+        const itemId = item.id ?? item.item_code;
+        if (itemId == null) continue;
+        const uomId = child.item_unit_of_measure_id ?? child.itemUnitOfMeasure?.id;
+        if (!remaining.has(itemId)) remaining.set(itemId, []);
+        remaining.get(itemId).push({ childId: child.id, uomId, qtyBase: num(child.quantity) });
       }
 
       // 2. Location constant (guide §3 D5)
@@ -1274,26 +1280,23 @@
               queue.shift();
             } else {
               // only part of this child goes into this container → pack-short-v2.
-              // short_quantity is in the child's UOM units (guide §2.4 / §12.b).
-              // NOTE: per the guide, short_quantity = the part packed INTO this
-              // container and the returned NEW child carries the remainder for the
-              // next container. (See build note flagged to the operator: if C7's
-              // short_quantity is instead the "peel-off"/remainder amount, invert
-              // `partUom` here — the only line affected.)
+              // short_quantity is in BASE units (same units as child.quantity —
+              // confirmed from the pack HAR: short_quantity=6 packed 6 and left a
+              // remainder child of 19, i.e. 25-6). short_quantity = the amount packed
+              // INTO this container; the returned NEW child carries the remainder
+              // (which stays in the source tote) for the next container.
               const partBase = need;
-              const partUom = Math.max(1, Math.round(partBase / child.factor));
               const resp = await qCall(`packshort-${child.childId}-${containerId}`, () =>
                 apiGet(
                   `shipment/shipment-container/pack-short-v2` +
                   `&into_location=${loc}&shipment_detail_child_id=${child.childId}` +
-                  `&short_quantity=${partUom}&container_id=${containerId}` +
+                  `&short_quantity=${partBase}&container_id=${containerId}` +
                   `&custom_field_1=null&custom_field_2=null&profile_id=${State.profile.id}`
                 ));
               const newChildId = resp?.id || resp?.child_id ||
                 resp?.shipmentDetailChild?.id || resp?.shipment_detail_child?.id;
               // Remainder continues under the new child id for later containers
-              child.qtyUom = Math.max(0, child.qtyUom - partUom);
-              child.qtyBase = child.qtyUom * child.factor;
+              child.qtyBase = Math.max(0, child.qtyBase - partBase);
               if (newChildId) child.childId = newChildId;
               need = 0;
             }
@@ -1305,9 +1308,22 @@
         await closeToContainer(containerId, loc, cont);
       }
 
-      // 4. Stop. Do NOT call create-consignment-pieces (guide §2.2/§12).
-      LOG('Commit complete — shipment left at Consigning Pending. No consign call fired.');
-      renderSuccess();
+      // 4. Verify the shipment actually advanced before declaring success. C7 moves
+      //    the shipment to Consigning Pending (7) as a side effect of all children
+      //    being packed into closed containers — but a close can soft-fail server-side
+      //    (e.g. "statusFlow on null") and leave it at Pack Pending. Don't show a false
+      //    ✓ in that case (guide §2.2/§12). Do NOT call create-consignment-pieces.
+      renderCommitting('Verifying shipment status…');
+      const advanced = await verifyConsigningPending();
+      if (advanced) {
+        LOG('Commit complete — shipment at Consigning Pending. No consign call fired.');
+        renderSuccess();
+      } else {
+        WARN('Commit ran but shipment is still Pack Pending — a container may not have closed.');
+        renderCommitError(new Error(
+          'Packing didn’t complete — the shipment is still Pack Pending (a container may have failed to close). ' +
+          'Nothing was consigned; check C7 and retry.'));
+      }
     } catch (err) {
       if (err.message === 'Session expired') return;   // overlay already shown
       WARN('commit failed:', err.message);
@@ -1315,11 +1331,22 @@
     }
   }
 
-  // Resolve a GPC child's UOM factor (guide §12 — child.quantity is UOM-native)
-  function resolveChildFactor(item, uomId, child) {
-    if (num(child.itemUnitOfMeasure?.factor) > 0) return num(child.itemUnitOfMeasure.factor);
-    const um = (item.itemUnitOfMeasures || []).find(u => u.id === uomId);
-    return num(um?.factor) > 0 ? num(um.factor) : 1;
+  // Re-fetch the shipment header status; true once it reaches Consigning Pending (7).
+  async function verifyConsigningPending() {
+    try {
+      const data = await apiGet(
+        `shipment/shipment-detail&shipment_number=${encShip(Cache.shipmentNumber)}` +
+        `&expand=shipmentHeader&fields=id,shipment_header.id,shipment_header.leading_status_id` +
+        `&per-page=1&page=1`
+      );
+      const rows = Array.isArray(data) ? data : (data?.items || []);
+      const st = Number(rows[0]?.shipment_header?.leading_status_id);
+      LOG('post-commit leading status:', st);
+      return st === 7;
+    } catch (e) {
+      WARN('status verify failed:', e.message);
+      return false;   // can't confirm → treat as not-advanced (honest, retryable)
+    }
   }
 
   // close-to-container with Pack's soft-500 handling (guide §2.4). Returns even
