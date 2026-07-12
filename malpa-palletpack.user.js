@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.1.0
+// @version      1.2.0
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -595,41 +595,117 @@
 
   const _SCAN_SCREENS = { SHIPMENT_ENTRY: 'mpp-ship-in', SCAN: 'mpp-scan-in' };
 
+  let _mppTabPoll = null;
+  let _mppViewVisible = false;
+
   function openUI() {
-    if (document.getElementById('mpp-root')) return;
+    // Already open — just re-show/re-activate our tab (view may be hidden because
+    // the operator clicked another C7 tab).
+    if (document.getElementById('mpp-root')) { showRoot(); return; }
     injectCSS();
     const overlay = document.createElement('div');
     overlay.id = 'mpp-root';
     overlay.className = 'mpp-root';
     document.body.appendChild(overlay);
+    insertTabChip();
     positionRoot();
     window.addEventListener('resize', positionRoot);
     document.addEventListener('keydown', onGlobalKey, true);
+    _mppViewVisible = true;
     if (!State.profiles.length) { initData(); renderProfileSelect('Loading profiles…'); }
     else renderProfileSelect();
   }
 
-  // Fill the C7 main content area like a native tab (matches Pack's positionTabView):
-  // top = bottom of the C7 tab bar, left = right edge of the sidebar. Falls back to
-  // full-screen when those chrome elements aren't present (e.g. collapsed TC51 layout).
+  // Position the window to fill the C7 content area WITHOUT covering the chrome —
+  // top = bottom of the C7 tab bar, left = right edge of the sidebar (mirrors Pack's
+  // positionTabView). Uses C7's usual defaults (56 / 200) when the chrome isn't found,
+  // so we never sit on top of the tab bar.
   function positionRoot() {
     const r = document.getElementById('mpp-root');
     if (!r) return;
     const sidebar = document.querySelector('div.sidebar, .sidebar');
     const tabBar  = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
-    let top = 0, left = 0;
-    if (tabBar)  { const b = tabBar.getBoundingClientRect();  if (b.bottom > 0 && b.bottom < window.innerHeight) top  = Math.round(b.bottom); }
-    if (sidebar) { const b = sidebar.getBoundingClientRect(); if (b.right  > 0 && b.right  < window.innerWidth)  left = Math.round(b.right); }
+    let top = 56, left = 200;
+    if (tabBar)  { const b = tabBar.getBoundingClientRect();  if (b.height) top  = Math.round(b.bottom); }
+    if (sidebar) { const b = sidebar.getBoundingClientRect(); if (b.width)  left = Math.round(b.right); }
     r.style.top = top + 'px';
     r.style.left = left + 'px';
     r.style.right = '0px';
     r.style.bottom = '0px';
   }
 
+  // ── Native C7 tab-bar integration (mirrors Malpa Pack) ──────────────────────
+  // We add a real <li> tab into C7's tab bar so Pallet Pack reads as a native tab:
+  // clicking it shows our view, clicking any other tab hides it, and a poll hides it
+  // if C7's router activates/removes tabs on its own.
+  function showRoot() {
+    const r = document.getElementById('mpp-root'); if (r) r.style.display = 'flex';
+    const li = document.getElementById('mpp-tab-li');
+    if (li) { li.classList.add('active'); const a = li.querySelector('a'); if (a) { a.classList.add('active'); a.setAttribute('aria-selected', 'true'); } }
+    _mppViewVisible = true;
+    positionRoot();
+    _refocusScanInput();
+  }
+  function hideRoot() {
+    const r = document.getElementById('mpp-root'); if (r) r.style.display = 'none';
+    const li = document.getElementById('mpp-tab-li');
+    if (li) { li.classList.remove('active'); const a = li.querySelector('a'); if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); } }
+    _mppViewVisible = false;
+  }
+
+  function insertTabChip() {
+    const tabBar = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+    if (!tabBar || document.getElementById('mpp-tab-li')) return;
+
+    // De-activate native tabs so ours reads as the current one.
+    tabBar.querySelectorAll('li.nav-item').forEach(li => {
+      li.classList.remove('active');
+      const a = li.querySelector('a.nav-link');
+      if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); }
+    });
+
+    const li = document.createElement('li');
+    li.id = 'mpp-tab-li';
+    li.className = 'nav-item ng-star-inserted active';
+
+    const a = document.createElement('a');
+    a.className = 'nav-link active';
+    a.href = 'javascript:void(0);';
+    a.setAttribute('role', 'tab');
+    a.setAttribute('aria-selected', 'true');
+    a.innerHTML = '<span class="mpp-tab-label">Pallet Pack</span>' +
+                  '<span class="mpp-tab-x" title="Close Pallet Pack">×</span>';
+    a.addEventListener('click', (e) => {
+      if (e.target.closest('.mpp-tab-x')) { e.preventDefault(); e.stopPropagation(); confirmClose(); return; }
+      e.preventDefault();
+      showRoot();
+    });
+    li.appendChild(a);
+    tabBar.appendChild(li);
+
+    // Poll: hide our view if C7 removes our tab (router nav) or activates another tab.
+    clearInterval(_mppTabPoll);
+    _mppTabPoll = setInterval(() => {
+      if (!document.getElementById('mpp-root')) { clearInterval(_mppTabPoll); _mppTabPoll = null; return; }
+      if (!document.getElementById('mpp-tab-li')) { hideRoot(); return; }
+      if (_mppViewVisible) {
+        const another = tabBar.querySelector('li.nav-item.active:not(#mpp-tab-li)');
+        if (another) hideRoot();
+      }
+    }, 250);
+  }
+
+  function removeTabChip() {
+    clearInterval(_mppTabPoll); _mppTabPoll = null;
+    document.getElementById('mpp-tab-li')?.remove();
+  }
+
   function closeUI() {
     document.removeEventListener('keydown', onGlobalKey, true);
     window.removeEventListener('resize', positionRoot);
+    removeTabChip();
     document.getElementById('mpp-root')?.remove();
+    _mppViewVisible = false;
     resetAll();
   }
 
@@ -1320,9 +1396,17 @@
     if (_navClickAttached) return;
     _navClickAttached = true;
     document.addEventListener('click', (e) => {
+      // Our sidebar launcher → open / re-show.
       const nav = document.getElementById('mpp-nav');
-      if (!nav) return;
-      if (nav === e.target || nav.contains(e.target)) { e.preventDefault(); openUI(); }
+      if (nav && (nav === e.target || nav.contains(e.target))) { e.preventDefault(); openUI(); return; }
+
+      // While our view is open, clicking any OTHER C7 tab or sidebar nav link should
+      // hide our view (C7 is switching to its own content) — same behaviour as Pack.
+      if (!document.getElementById('mpp-root') || !_mppViewVisible) return;
+      if (e.target.closest('#mpp-tab-li')) return;                       // our own tab — handled there
+      const otherTab = e.target.closest('ul.nav.nav-tabs[role="tablist"] li.nav-item');
+      const sideNav  = e.target.closest('div.sidebar a.nav-link, .sidebar a.nav-link, div.sidebar li.nav-item');
+      if (otherTab || sideNav) hideRoot();
     }, true);
   }
 
@@ -1463,6 +1547,12 @@
         opacity:0;transition:.25s;z-index:20;max-width:90%;box-shadow:0 8px 24px rgba(0,0,0,.25)}
       .mpp-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
       #mpp-nav .mpp-nav-label{vertical-align:middle}
+      /* Tab chip injected into C7's tab bar — inherits C7 tab styling from
+         .nav-item/.nav-link; these rules only style our label + close control. */
+      #mpp-tab-li .mpp-tab-label{vertical-align:middle}
+      #mpp-tab-li .mpp-tab-x{margin-left:10px;font-size:16px;line-height:1;opacity:.65;
+        cursor:pointer;padding:0 2px;border-radius:3px}
+      #mpp-tab-li .mpp-tab-x:hover{opacity:1;background:rgba(0,0,0,.08)}
     `;
     document.head.appendChild(style);
   }
