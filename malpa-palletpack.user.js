@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.2
+// @version      1.2.3
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -34,6 +34,12 @@
  *
  *  Scaffolding lifted from Malpa Pick v4.8.9 (session/nav/focus/audio) and
  *  Malpa Pack v3.3.78 (APIQueue + create/move/pack-short-v2/close call shapes).
+ *
+ *  v1.2.3 — Shell now uses Malpa Pick's native tab-pane model: the view is injected
+ *  as a real .tab-pane inside C7's div.tab-content (not a fixed overlay), so it fills
+ *  the content area automatically and reflows when the sidebar collapses. Height is
+ *  measured in JS (measureHeight); width is handled by C7's own flow. Removes the old
+ *  positionRoot / tab-poll / mutation-observer overlay machinery.
  * ═══════════════════════════════════════════════════════════════════════════════
  */
 
@@ -595,138 +601,61 @@
 
   const _SCAN_SCREENS = { SHIPMENT_ENTRY: 'mpp-ship-in', SCAN: 'mpp-scan-in' };
 
-  let _mppTabPoll = null;
   let _mppViewVisible = false;
-  // The native C7 tab Angular held active when we (re)showed our view. Angular keeps
-  // re-asserting `active` on this element even though it has no idea our tab exists, so
-  // we must NOT treat its reappearance as navigation — only a *different* element
-  // becoming active is a real tab switch. (See tab-integration notes below.)
-  let _nativeActiveAtOpen = null;
-  let _mppTabObserver = null;
 
-  function _snapshotNativeActive(tabBar) {
-    const tb = tabBar || document.querySelector('ul.nav.nav-tabs[role="tablist"]');
-    _nativeActiveAtOpen = tb ? tb.querySelector('li.nav-item.active:not(#mpp-tab-li)') : null;
-  }
-
-  // Cosmetic only: strip `active` off the baseline native tab whenever Angular re-adds
-  // it, so ours stays the sole highlighted tab. Watches the whole tab bar but only ever
-  // touches _nativeActiveAtOpen, so a genuinely different tab going active is left for
-  // the poll to treat as real navigation.
-  function _startTabObserver(tabBar) {
-    _stopTabObserver();
-    _mppTabObserver = new MutationObserver(() => {
-      if (!_mppViewVisible || !_nativeActiveAtOpen) return;
-      if (_nativeActiveAtOpen.classList.contains('active')) {
-        _nativeActiveAtOpen.classList.remove('active');
-        const a = _nativeActiveAtOpen.querySelector('a.nav-link');
-        if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); }
-      }
-    });
-    _mppTabObserver.observe(tabBar, { subtree: true, attributes: true, attributeFilter: ['class'] });
-  }
-  function _stopTabObserver() { if (_mppTabObserver) { _mppTabObserver.disconnect(); _mppTabObserver = null; } }
-
-  // TC51 sidebar state — remembered on open, restored on close (mirrors Pick).
-  let _mppSidebarRO = null;
+  // TC51 sidebar state + the native tab/pane active before we opened (restored on close).
   let _mppSidebarWasMin = false;
-  let _mppBrandWasMin = false;
+  let _mppBrandWasMin   = false;
+  let _prevActiveLi     = null;
+  let _prevActivePanel  = null;
 
-  function openUI() {
-    // Already open — just re-show/re-activate our tab (view may be hidden because
-    // the operator clicked another C7 tab).
-    if (document.getElementById('mpp-root')) { showRoot(); return; }
-    injectCSS();
-    const overlay = document.createElement('div');
-    overlay.id = 'mpp-root';
-    overlay.className = 'mpp-root';
-    document.body.appendChild(overlay);
-
-    // Minimise the C7 sidebar on open so the window fills the screen; store its prior
-    // state so closeUI() only undoes what we changed (mirrors malpa-pick.user.js).
-    _mppSidebarWasMin = document.body.classList.contains('sidebar-minimized');
-    _mppBrandWasMin   = document.body.classList.contains('brand-minimized');
-    document.body.classList.add('sidebar-minimized', 'brand-minimized');
-
-    insertTabChip();
-    positionRoot();
-    window.addEventListener('resize', positionRoot);
-
-    // THE FIX: collapsing/expanding the sidebar is a body-class toggle that never emits
-    // window.resize, so positionRoot used to keep a stale left offset (a gap on the
-    // TC51). Watch the sidebar box directly — the ResizeObserver fires as it animates.
-    const sidebarEl = document.querySelector('div.sidebar, .sidebar');
-    if (sidebarEl && 'ResizeObserver' in window) {
-      _mppSidebarRO = new ResizeObserver(() => positionRoot());
-      _mppSidebarRO.observe(sidebarEl);
+  // Height = window height minus our top offset. Width needs no JS — the panel is a
+  // native .tab-pane in C7's flow, so it fills the content area and reflows when the
+  // sidebar collapses. (Mirrors malpa-pick.user.js measureHeight.)
+  function measureHeight() {
+    const panel = document.getElementById('mpp-root');
+    if (!panel) return;
+    const rect = panel.getBoundingClientRect();
+    const available = Math.floor(window.innerHeight - rect.top);
+    if (available > 100) {
+      panel.style.height    = available + 'px';
+      panel.style.maxHeight = available + 'px';
+      panel.style.minHeight = available + 'px';
     }
-    setTimeout(positionRoot, 60);   // belt-and-braces once the collapse settles
-
-    document.addEventListener('keydown', onGlobalKey, true);
-    _mppViewVisible = true;
-    if (!State.profiles.length) { initData(); renderProfileSelect('Loading profiles…'); }
-    else renderProfileSelect();
   }
 
-  // Position the window to fill the C7 content area WITHOUT covering the chrome —
-  // top = bottom of the C7 tab bar, left = right edge of the sidebar (mirrors Pack's
-  // positionTabView). Uses C7's usual defaults (56 / 200) when the chrome isn't found,
-  // so we never sit on top of the tab bar.
-  function positionRoot() {
-    const r = document.getElementById('mpp-root');
-    if (!r) return;
-    const sidebar = document.querySelector('div.sidebar, .sidebar');
-    const tabBar  = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
-    let top = 56, left = 200;
-    if (tabBar)  { const b = tabBar.getBoundingClientRect();  if (b.height) top  = Math.round(b.bottom); }
-    if (sidebar) { const b = sidebar.getBoundingClientRect(); if (b.width)  left = Math.round(b.right); }
-    r.style.top = top + 'px';
-    r.style.left = left + 'px';
-    r.style.right = '0px';
-    r.style.bottom = '0px';
-  }
-
-  // ── Native C7 tab-bar integration (mirrors Malpa Pack) ──────────────────────
-  // We add a real <li> tab into C7's tab bar so Pallet Pack reads as a native tab:
-  // clicking it shows our view, clicking any other tab hides it, and a poll hides it
-  // if C7's router activates/removes tabs on its own.
-  function showRoot() {
-    // Re-baseline against whatever native tab is active right now (the operator may
-    // have navigated to a different native tab before returning to us).
-    _snapshotNativeActive();
-    const r = document.getElementById('mpp-root'); if (r) r.style.display = 'flex';
-    const li = document.getElementById('mpp-tab-li');
-    if (li) { li.classList.add('active'); const a = li.querySelector('a'); if (a) { a.classList.add('active'); a.setAttribute('aria-selected', 'true'); } }
-    _mppViewVisible = true;
-    positionRoot();
-    _refocusScanInput();
-  }
-  function hideRoot() {
-    const r = document.getElementById('mpp-root'); if (r) r.style.display = 'none';
-    const li = document.getElementById('mpp-tab-li');
-    if (li) { li.classList.remove('active'); const a = li.querySelector('a'); if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); } }
-    _mppViewVisible = false;
-  }
-
-  function insertTabChip() {
-    const tabBar = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
-    if (!tabBar || document.getElementById('mpp-tab-li')) return;
-
-    // Record the native tab Angular currently holds active BEFORE we touch anything —
-    // this is the element it will keep re-asserting, and must not read as navigation.
-    _snapshotNativeActive(tabBar);
-
-    // De-activate native tabs so ours reads as the current one.
+  function _deactivateNative(tabBar, tabContent) {
     tabBar.querySelectorAll('li.nav-item').forEach(li => {
+      if (li.id === 'mpp-tab-li') return;
       li.classList.remove('active');
       const a = li.querySelector('a.nav-link');
       if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); }
     });
+    tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane').forEach(p => {
+      if (p.id === 'mpp-root') return;
+      p.classList.remove('active');
+      p.style.display = 'none';
+    });
+  }
 
+  function openUI() {
+    if (document.getElementById('mpp-root')) { showRoot(); return; }
+    injectCSS();
+
+    const tabBar     = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+    const tabContent = document.querySelector('div.tab-content');
+    if (!tabBar || !tabContent) { WARN('Could not find C7 tab bar or tab content.'); return; }
+
+    // Remember what was active so closeUI() restores it exactly.
+    const prevLi    = tabBar.querySelector('li.nav-item.active');
+    const prevPanel = tabContent.querySelector(':scope > .tab-pane.active, :scope > tab.active');
+    if (prevLi)    _prevActiveLi    = prevLi;
+    if (prevPanel) _prevActivePanel = prevPanel;
+
+    // Tab chip in C7's tab bar.
     const li = document.createElement('li');
     li.id = 'mpp-tab-li';
     li.className = 'nav-item ng-star-inserted active';
-
     const a = document.createElement('a');
     a.className = 'nav-link active';
     a.href = 'javascript:void(0);';
@@ -741,41 +670,88 @@
     });
     li.appendChild(a);
     tabBar.appendChild(li);
-    _startTabObserver(tabBar);
 
-    // Poll backstop for router-driven changes (no click event fires):
-    //  • our tab removed by Angular navigation → hide
-    //  • a native tab OTHER than the one active when we opened becomes active → real
-    //    navigation → hide. The baseline element re-appearing is just Angular
-    //    re-asserting its unchanged router state and is ignored (that was the bug that
-    //    bounced the operator straight back to the native tab).
-    clearInterval(_mppTabPoll);
-    _mppTabPoll = setInterval(() => {
-      if (!document.getElementById('mpp-root')) { clearInterval(_mppTabPoll); _mppTabPoll = null; return; }
-      if (!document.getElementById('mpp-tab-li')) { hideRoot(); return; }
-      if (_mppViewVisible) {
-        const nativeActive = tabBar.querySelector('li.nav-item.active:not(#mpp-tab-li)');
-        if (nativeActive && nativeActive !== _nativeActiveAtOpen) hideRoot();
-      }
-    }, 250);
+    // Panel as a native .tab-pane inside tab-content — THIS is what fills the screen.
+    const overlay = document.createElement('div');
+    overlay.id = 'mpp-root';
+    overlay.className = 'mpp-root tab-pane active';
+    overlay.style.display = 'flex';   // inline beats any C7 .tab-pane.active{display:block}
+    tabContent.appendChild(overlay);
+
+    _deactivateNative(tabBar, tabContent);
+
+    // Minimise the C7 sidebar for max TC51 space; store prior state to restore later.
+    _mppSidebarWasMin = document.body.classList.contains('sidebar-minimized');
+    _mppBrandWasMin   = document.body.classList.contains('brand-minimized');
+    document.body.classList.add('sidebar-minimized', 'brand-minimized');
+
+    document.addEventListener('keydown', onGlobalKey, true);
+    setTimeout(measureHeight, 50);
+    window.addEventListener('resize', measureHeight);
+
+    _mppViewVisible = true;
+    if (!State.profiles.length) { initData(); renderProfileSelect('Loading profiles…'); }
+    else renderProfileSelect();
   }
 
-  function removeTabChip() {
-    clearInterval(_mppTabPoll); _mppTabPoll = null;
-    _stopTabObserver();
-    _nativeActiveAtOpen = null;
-    document.getElementById('mpp-tab-li')?.remove();
+  // ── Native C7 tab-bar integration (mirrors Malpa Pick) ──────────────────────
+  // Re-show after the operator clicked away to a native C7 tab.
+  function showRoot() {
+    const tabBar     = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+    const tabContent = document.querySelector('div.tab-content');
+    const r  = document.getElementById('mpp-root');
+    const li = document.getElementById('mpp-tab-li');
+    if (!r || !tabBar || !tabContent) return;
+    const prevLi    = tabBar.querySelector('li.nav-item.active:not(#mpp-tab-li)');
+    const prevPanel = tabContent.querySelector(':scope > .tab-pane.active:not(#mpp-root), :scope > tab.active');
+    if (prevLi)    _prevActiveLi    = prevLi;
+    if (prevPanel) _prevActivePanel = prevPanel;
+    _deactivateNative(tabBar, tabContent);
+    r.classList.add('active'); r.style.display = 'flex';
+    if (li) { li.classList.add('active'); const la = li.querySelector('a'); if (la) { la.classList.add('active'); la.setAttribute('aria-selected', 'true'); } }
+    _mppViewVisible = true;
+    measureHeight();
+    _refocusScanInput();
+  }
+
+  // Step aside when the operator clicks a native C7 tab (Angular shows that pane).
+  function hideRoot() {
+    const r  = document.getElementById('mpp-root');
+    const li = document.getElementById('mpp-tab-li');
+    if (r) { r.classList.remove('active'); r.style.display = 'none'; }
+    if (li) { li.classList.remove('active'); const a = li.querySelector('a'); if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); } }
+    _mppViewVisible = false;
   }
 
   function closeUI() {
     document.removeEventListener('keydown', onGlobalKey, true);
-    window.removeEventListener('resize', positionRoot);
-    if (_mppSidebarRO) { _mppSidebarRO.disconnect(); _mppSidebarRO = null; }
+    window.removeEventListener('resize', measureHeight);
     // Restore the sidebar to its pre-open state — only undo classes we added.
     if (!_mppSidebarWasMin) document.body.classList.remove('sidebar-minimized');
     if (!_mppBrandWasMin)   document.body.classList.remove('brand-minimized');
-    removeTabChip();
+
+    document.getElementById('mpp-tab-li')?.remove();
     document.getElementById('mpp-root')?.remove();
+
+    // Restore exactly the tab + pane that were active before we opened.
+    if (_prevActiveLi && document.contains(_prevActiveLi)) {
+      _prevActiveLi.classList.add('active');
+      const a = _prevActiveLi.querySelector('a.nav-link');
+      if (a) { a.classList.add('active'); a.setAttribute('aria-selected', 'true'); }
+    } else {
+      const tabBar = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+      const lastLi = tabBar && Array.from(tabBar.querySelectorAll('li.nav-item')).pop();
+      if (lastLi) { lastLi.classList.add('active'); const a = lastLi.querySelector('a.nav-link'); if (a) { a.classList.add('active'); a.setAttribute('aria-selected', 'true'); } }
+    }
+    if (_prevActivePanel && document.contains(_prevActivePanel)) {
+      _prevActivePanel.classList.add('active');
+      _prevActivePanel.style.display = '';
+    } else {
+      const tabContent = document.querySelector('div.tab-content');
+      const panels = tabContent && Array.from(tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane'));
+      if (panels && panels.length) { const last = panels[panels.length - 1]; last.classList.add('active'); last.style.display = ''; }
+    }
+    _prevActiveLi = null; _prevActivePanel = null;
     _mppViewVisible = false;
     resetAll();
   }
@@ -1520,7 +1496,9 @@
     style.id = 'mpp-styles';
     style.textContent = `
       /* Canary7-matched design tokens (same palette as Malpa Pack v3) — scoped to
-         our root so we never touch C7's own :root variables. */
+         our root so we never touch C7's own :root variables.
+         The root is now a native .tab-pane inside div.tab-content (like Malpa Pick),
+         so it flows/fills automatically — position:relative, height set by JS. */
       .mpp-root{
         --c7-bg:#eef1f5; --c7-surf:#ffffff; --c7-surf2:#f9f9fa; --c7-surf3:#eef9fd;
         --c7-border:#e1e6ef; --c7-border2:#c0cadd; --c7-text:#394967;
@@ -1528,7 +1506,8 @@
         --c7-green:#79c447; --c7-green-bg:#eff9eb; --c7-green-bd:#bde5ae; --c7-red:#ff5454;
         --c7-font:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;
         --c7-mono:'SF Mono','Fira Code',Consolas,monospace; --c7-r:4px;
-        position:fixed; z-index:100; background:var(--c7-surf2); color:var(--c7-text);
+        position:relative; height:calc(100vh - 55px); max-height:100vh;
+        background:var(--c7-surf2); color:var(--c7-text);
         font-family:var(--c7-font); display:flex; flex-direction:column; overflow:hidden;
         animation:mpp-in .12s ease;
       }
