@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.0
+// @version      1.2.1
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -597,6 +597,35 @@
 
   let _mppTabPoll = null;
   let _mppViewVisible = false;
+  // The native C7 tab Angular held active when we (re)showed our view. Angular keeps
+  // re-asserting `active` on this element even though it has no idea our tab exists, so
+  // we must NOT treat its reappearance as navigation — only a *different* element
+  // becoming active is a real tab switch. (See tab-integration notes below.)
+  let _nativeActiveAtOpen = null;
+  let _mppTabObserver = null;
+
+  function _snapshotNativeActive(tabBar) {
+    const tb = tabBar || document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+    _nativeActiveAtOpen = tb ? tb.querySelector('li.nav-item.active:not(#mpp-tab-li)') : null;
+  }
+
+  // Cosmetic only: strip `active` off the baseline native tab whenever Angular re-adds
+  // it, so ours stays the sole highlighted tab. Watches the whole tab bar but only ever
+  // touches _nativeActiveAtOpen, so a genuinely different tab going active is left for
+  // the poll to treat as real navigation.
+  function _startTabObserver(tabBar) {
+    _stopTabObserver();
+    _mppTabObserver = new MutationObserver(() => {
+      if (!_mppViewVisible || !_nativeActiveAtOpen) return;
+      if (_nativeActiveAtOpen.classList.contains('active')) {
+        _nativeActiveAtOpen.classList.remove('active');
+        const a = _nativeActiveAtOpen.querySelector('a.nav-link');
+        if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); }
+      }
+    });
+    _mppTabObserver.observe(tabBar, { subtree: true, attributes: true, attributeFilter: ['class'] });
+  }
+  function _stopTabObserver() { if (_mppTabObserver) { _mppTabObserver.disconnect(); _mppTabObserver = null; } }
 
   function openUI() {
     // Already open — just re-show/re-activate our tab (view may be hidden because
@@ -639,6 +668,9 @@
   // clicking it shows our view, clicking any other tab hides it, and a poll hides it
   // if C7's router activates/removes tabs on its own.
   function showRoot() {
+    // Re-baseline against whatever native tab is active right now (the operator may
+    // have navigated to a different native tab before returning to us).
+    _snapshotNativeActive();
     const r = document.getElementById('mpp-root'); if (r) r.style.display = 'flex';
     const li = document.getElementById('mpp-tab-li');
     if (li) { li.classList.add('active'); const a = li.querySelector('a'); if (a) { a.classList.add('active'); a.setAttribute('aria-selected', 'true'); } }
@@ -656,6 +688,10 @@
   function insertTabChip() {
     const tabBar = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
     if (!tabBar || document.getElementById('mpp-tab-li')) return;
+
+    // Record the native tab Angular currently holds active BEFORE we touch anything —
+    // this is the element it will keep re-asserting, and must not read as navigation.
+    _snapshotNativeActive(tabBar);
 
     // De-activate native tabs so ours reads as the current one.
     tabBar.querySelectorAll('li.nav-item').forEach(li => {
@@ -682,21 +718,29 @@
     });
     li.appendChild(a);
     tabBar.appendChild(li);
+    _startTabObserver(tabBar);
 
-    // Poll: hide our view if C7 removes our tab (router nav) or activates another tab.
+    // Poll backstop for router-driven changes (no click event fires):
+    //  • our tab removed by Angular navigation → hide
+    //  • a native tab OTHER than the one active when we opened becomes active → real
+    //    navigation → hide. The baseline element re-appearing is just Angular
+    //    re-asserting its unchanged router state and is ignored (that was the bug that
+    //    bounced the operator straight back to the native tab).
     clearInterval(_mppTabPoll);
     _mppTabPoll = setInterval(() => {
       if (!document.getElementById('mpp-root')) { clearInterval(_mppTabPoll); _mppTabPoll = null; return; }
       if (!document.getElementById('mpp-tab-li')) { hideRoot(); return; }
       if (_mppViewVisible) {
-        const another = tabBar.querySelector('li.nav-item.active:not(#mpp-tab-li)');
-        if (another) hideRoot();
+        const nativeActive = tabBar.querySelector('li.nav-item.active:not(#mpp-tab-li)');
+        if (nativeActive && nativeActive !== _nativeActiveAtOpen) hideRoot();
       }
     }, 250);
   }
 
   function removeTabChip() {
     clearInterval(_mppTabPoll); _mppTabPoll = null;
+    _stopTabObserver();
+    _nativeActiveAtOpen = null;
     document.getElementById('mpp-tab-li')?.remove();
   }
 
