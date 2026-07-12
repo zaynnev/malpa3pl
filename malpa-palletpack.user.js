@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.4
+// @version      1.2.5
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -485,7 +485,12 @@
     // signal — guide §7/§15). Detail rows don't reliably carry a leading status, so
     // reading it per-line gave false negatives. Only block when we can POSITIVELY
     // read a status that isn't 5; if it's absent, proceed rather than false-block.
-    const hdr = lines[0].shipment_header || {};
+    // C7 returns an EXPANDed relation under its camelCase name (`shipmentHeader`),
+    // not `shipment_header`. Reading the snake_case key left shipmentHeaderId undefined,
+    // so the create body omitted shipment_header_id → the container had no shipment
+    // link → close-to-container 500'd on `shipmentHeader->statusFlow`. Read camelCase
+    // first, snake_case as a fallback.
+    const hdr = lines[0].shipmentHeader || lines[0].shipment_header || {};
     const rawStatus = hdr.leading_status_id ?? hdr.leadingStatus?.id ?? hdr.leadingStatus;
     const status = (rawStatus === undefined || rawStatus === null || rawStatus === '')
       ? null : Number(rawStatus);
@@ -498,8 +503,9 @@
 
     // Build the blind cache (guide §8)
     Cache.reset();
-    Cache.shipmentNumber = lines[0].shipment_header?.shipment_number || shipmentNumber;
-    Cache.shipmentHeaderId = lines[0].shipment_header?.id;
+    Cache.shipmentNumber = hdr.shipment_number || shipmentNumber;
+    Cache.shipmentHeaderId = hdr.id;
+    if (Cache.shipmentHeaderId == null) WARN('shipment_header id not found in load response — create/close will fail.');
 
     const onlyRef = profileOnlyAcceptsReference();
     let uomModelMissing = false;
@@ -1340,7 +1346,8 @@
         `&per-page=1&page=1`
       );
       const rows = Array.isArray(data) ? data : (data?.items || []);
-      const st = Number(rows[0]?.shipment_header?.leading_status_id);
+      const h = rows[0]?.shipmentHeader || rows[0]?.shipment_header || {};
+      const st = Number(h.leading_status_id);
       LOG('post-commit leading status:', st);
       return st === 7;
     } catch (e) {
