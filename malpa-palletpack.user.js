@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.7
+// @version      1.2.8
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -869,7 +869,7 @@
         <div class="mpp-scan-zone" id="mpp-scan-zone">
           <div class="mpp-scan-zone-label">Scan items</div>
           <div class="mpp-scan-arrows">&gt;&gt;&gt;</div>
-          <input id="mpp-scan-in" class="mpp-scan" type="text" inputmode="none"
+          <input id="mpp-scan-in" class="mpp-scan" type="text" inputmode="none" readonly
                  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
         </div>
         <div class="mpp-scan-meta" id="mpp-scan-meta"></div>
@@ -881,12 +881,18 @@
       </div>`;
     wireHeader();
     const inp = document.getElementById('mpp-scan-in');
+    // The input is `readonly` so the TC51 never pops the soft keyboard (inputmode="none"
+    // isn't honoured on its Firefox). A readonly input still receives keydown events, so
+    // we accumulate the hardware scanner's characters ourselves and submit on Enter.
+    let scanBuf = '';
     inp?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.keyCode === 13) {
         e.preventDefault();
-        const v = inp.value.trim();
-        inp.value = '';
+        const v = scanBuf.trim();
+        scanBuf = '';
         if (v) onScan(v);
+      } else if (e.key && e.key.length === 1) {
+        scanBuf += e.key;   // printable char from the scanner
       }
     });
     document.getElementById('mpp-view-btn')?.addEventListener('click', showViewScanned);
@@ -926,21 +932,40 @@
   // ---- View scanned modal (guide §10, decision #6) --------------------------
   function showViewScanned() {
     const r = root(); if (!r) return;
-    const rows = [];
-    for (const [id, it] of Cache.items) {
-      if (it.scannedBase > 0) rows.push(itemScanRow(id, it));
-    }
+
+    // Grouped by container: each closed box, then the open one, with a per-item UOM
+    // breakdown inside each (guide §10 "optionally grouped by container").
+    let curUnits = 0; for (const v of Cache.current.lines.values()) curUnits += v;
+    const boxes = curUnits > 0 ? [...Cache.containers, Cache.current] : [...Cache.containers];
+
+    const groups = [];
+    boxes.forEach((box, idx) => {
+      const itemRows = [];
+      for (const [id, base] of box.lines) {
+        if (base <= 0) continue;
+        itemRows.push(itemScanRow(id, base));
+      }
+      if (!itemRows.length) return;
+      const isOpen = box === Cache.current;
+      const label = `Container ${idx + 1}` +
+        (box.containerNo ? ` — ${_esc(box.containerNo)}` : '') +
+        (isOpen ? ' (open)' : '');
+      groups.push(`<div class="mpp-vs-group"><div class="mpp-vs-group-h">${label}</div>${itemRows.join('')}</div>`);
+    });
+
     const unexpectedRows = [...Cache.unexpected.entries()].map(([code, n]) =>
       `<div class="mpp-vs-row mpp-vs-bad"><span>${_esc(code)}</span><span>×${n} (unexpected)</span></div>`);
+
+    const body = groups.length || unexpectedRows.length
+      ? groups.join('') + (unexpectedRows.length ? `<div class="mpp-vs-group"><div class="mpp-vs-group-h">Unexpected</div>${unexpectedRows.join('')}</div>` : '')
+      : '<div class="mpp-note">Nothing scanned yet.</div>';
+
     const modal = document.createElement('div');
     modal.className = 'mpp-overlay';
     modal.innerHTML = `
       <div class="mpp-modal">
         <div class="mpp-modal-title">Scanned so far</div>
-        <div class="mpp-vs-list">
-          ${rows.length ? rows.join('') : '<div class="mpp-note">Nothing scanned yet.</div>'}
-          ${unexpectedRows.join('')}
-        </div>
+        <div class="mpp-vs-list">${body}</div>
         <button class="mpp-btn mpp-btn-primary" id="mpp-vs-close">Close</button>
       </div>`;
     r.appendChild(modal);
@@ -949,12 +974,12 @@
       setTimeout(() => document.getElementById('mpp-scan-in')?.focus(), 40);
     });
   }
-  function itemScanRow(id, it) {
-    // Friendly UOM breakdown when an outer factor exists (guide §10)
-    const breakdown = uomBreakdown(id, it.scannedBase);
+  function itemScanRow(id, base) {
+    const it = Cache.items.get(id);
+    const breakdown = uomBreakdown(id, base);   // friendly UOM breakdown (guide §10)
     return `<div class="mpp-vs-row">
-        <span><b>${_esc(it.itemCode)}</b> ${_esc(it.description)}</span>
-        <span>${it.scannedBase}${breakdown ? ` (${breakdown})` : ''}</span>
+        <span><b>${_esc(it?.itemCode || id)}</b> ${_esc(it?.description || '')}</span>
+        <span>${base}${breakdown ? ` (${breakdown})` : ''}</span>
       </div>`;
   }
   function uomBreakdown(itemId, base) {
@@ -1579,11 +1604,11 @@
       .mpp-grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
       .mpp-grid2>*{min-width:0}
       /* ── scan screen ── */
-      .mpp-scan-body{gap:16px}
+      .mpp-scan-body{gap:12px}
       .mpp-container-badge{align-self:center;background:var(--c7-surf3);border:1px solid var(--c7-border);
-        padding:8px 18px;border-radius:20px;font-weight:700;font-size:16px;color:var(--c7-teal)}
+        padding:6px 16px;border-radius:20px;font-weight:700;font-size:16px;color:var(--c7-teal)}
       .mpp-scan-zone{position:relative;border:2px dashed var(--c7-border2);border-radius:8px;
-        padding:40px 16px;text-align:center;background:var(--c7-bg);transition:background .12s,border-color .12s}
+        padding:22px 16px;text-align:center;background:var(--c7-bg);transition:background .12s,border-color .12s}
       .mpp-scan-zone.mpp-flash{background:var(--c7-green-bg);border-color:var(--c7-green-bd)}
       .mpp-scan-zone-label{font-size:20px;font-weight:700;color:var(--c7-text)}
       .mpp-scan-arrows{font-size:28px;color:var(--c7-teal);letter-spacing:4px;margin-top:8px}
@@ -1596,14 +1621,27 @@
       /* ── overlay + modal (light) ── */
       .mpp-overlay{position:absolute;inset:0;z-index:10;background:rgba(57,73,103,.45);
         display:flex;align-items:center;justify-content:center;padding:16px}
-      .mpp-modal{width:100%;max-width:440px;max-height:92%;overflow:hidden auto;background:var(--c7-surf);
-        border:1px solid var(--c7-border2);border-radius:8px;padding:18px;box-sizing:border-box;
-        display:flex;flex-direction:column;gap:12px;box-shadow:0 12px 40px rgba(57,73,103,.25)}
-      .mpp-modal-title{font-size:19px;font-weight:700;color:var(--c7-text)}
-      .mpp-vs-list{display:flex;flex-direction:column;gap:6px;margin:2px 0}
+      .mpp-modal{width:100%;max-width:440px;max-height:94%;overflow:hidden auto;background:var(--c7-surf);
+        border:1px solid var(--c7-border2);border-radius:8px;padding:16px;box-sizing:border-box;
+        display:flex;flex-direction:column;gap:10px;box-shadow:0 12px 40px rgba(57,73,103,.25)}
+      .mpp-modal-title{font-size:18px;font-weight:700;color:var(--c7-text)}
+      /* Compact everything INSIDE modals so Close Container / Finish fit the TC51
+         screen with no scrolling (touch targets stay >=42px). */
+      .mpp-modal .mpp-label{font-size:12px;letter-spacing:.5px;margin-bottom:2px}
+      .mpp-modal .mpp-input,.mpp-modal .mpp-select{min-height:44px;font-size:17px;padding:8px 12px}
+      .mpp-modal .mpp-grid2{gap:8px}
+      .mpp-modal .mpp-grid2 .mpp-input{min-height:42px;font-size:16px;padding:6px 10px}
+      .mpp-modal .mpp-btn{min-height:48px;font-size:16px}
+      .mpp-modal .mpp-fb{min-height:0}
+      .mpp-vs-list{display:flex;flex-direction:column;gap:5px;margin:2px 0}
       .mpp-vs-row{display:flex;justify-content:space-between;gap:10px;font-size:15px;
-        padding:10px 12px;background:var(--c7-bg);border-radius:var(--c7-r);color:var(--c7-text)}
+        padding:8px 12px;background:var(--c7-bg);border-radius:var(--c7-r);color:var(--c7-text)}
       .mpp-vs-bad{border-left:3px solid var(--c7-red);background:#fff3f3}
+      /* View-scanned per-container grouping */
+      .mpp-vs-group{display:flex;flex-direction:column;gap:5px}
+      .mpp-vs-group-h{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+        color:var(--c7-muted2);margin-top:8px;padding:0 2px}
+      .mpp-vs-group:first-child .mpp-vs-group-h{margin-top:0}
       /* ── success / error ── */
       .mpp-big-tick{font-size:64px;color:var(--c7-green);font-weight:700;line-height:1}
       .mpp-success-title{font-size:22px;font-weight:700;color:var(--c7-text)}
