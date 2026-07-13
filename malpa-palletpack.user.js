@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.6
+// @version      1.2.7
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -607,8 +607,6 @@
 
   const _SCAN_SCREENS = { SHIPMENT_ENTRY: 'mpp-ship-in', SCAN: 'mpp-scan-in' };
 
-  let _mppViewVisible = false;
-
   // TC51 sidebar state + the native tab/pane active before we opened (restored on close).
   let _mppSidebarWasMin = false;
   let _mppBrandWasMin   = false;
@@ -637,21 +635,17 @@
       const a = li.querySelector('a.nav-link');
       if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); }
     });
-    // Hide native panes with inline display:none ONLY — keep their `active` class so
-    // Angular's router state is untouched. Clearing the inline display later then makes
-    // the still-active pane visible again immediately, with no dependence on Angular
-    // re-activating it (removing `active` here left the pane blank after we stepped
-    // aside, because Angular thought it was already active and never re-rendered it).
     tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane').forEach(p => {
       if (p.id === 'mpp-root') return;
+      p.classList.remove('active');
       p.style.display = 'none';
     });
   }
 
-  // Reverse _deactivateNative's inline display:none on EVERY native pane, so that once
-  // we step aside, C7/Angular's own .active class controls visibility again. Without
-  // this the native menus render blank after using Pallet Pack — the sticky inline
-  // display:none overrides C7's .tab-pane.active{display:block}.
+  // On close, clear the inline display:none we put on EVERY native pane so C7's own
+  // .active class controls visibility again — otherwise any native tab whose pane we
+  // hid stays blank when the operator later opens it. (More thorough than Pick, which
+  // only restores the single previously-active pane.)
   function _unsuppressNativePanes() {
     const tabContent = document.querySelector('div.tab-content');
     if (!tabContent) return;
@@ -660,14 +654,17 @@
       p.style.display = '';
     });
   }
-  function _minimizeSidebar() { document.body.classList.add('sidebar-minimized', 'brand-minimized'); }
   function _restoreSidebar() {
     if (!_mppSidebarWasMin) document.body.classList.remove('sidebar-minimized');
     if (!_mppBrandWasMin)   document.body.classList.remove('brand-minimized');
   }
 
+  // Pallet Pack is MODAL, exactly like malpa-pick: either open (this pane fills the C7
+  // content area) or closed. There is NO "step aside when a native tab is clicked"
+  // behaviour — that half-hidden state is what blanked the native menus. The only exit
+  // is the tab × or Esc → closeUI(), which restores the prior tab + pane.
   function openUI() {
-    if (document.getElementById('mpp-root')) { showRoot(); return; }
+    if (document.getElementById('mpp-root')) { _refocusScanInput(); return; }  // double-open guard
     injectCSS();
 
     const tabBar     = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
@@ -692,9 +689,9 @@
     a.innerHTML = '<span class="mpp-tab-label">Pallet Pack</span>' +
                   '<span class="mpp-tab-x" title="Close Pallet Pack">×</span>';
     a.addEventListener('click', (e) => {
-      if (e.target.closest('.mpp-tab-x')) { e.preventDefault(); e.stopPropagation(); confirmClose(); return; }
+      // Body click is a no-op (we're already the active view); only × closes.
       e.preventDefault();
-      showRoot();
+      if (e.target.closest('.mpp-tab-x')) { e.stopPropagation(); confirmClose(); }
     });
     li.appendChild(a);
     tabBar.appendChild(li);
@@ -717,42 +714,8 @@
     setTimeout(measureHeight, 50);
     window.addEventListener('resize', measureHeight);
 
-    _mppViewVisible = true;
     if (!State.profiles.length) { initData(); renderProfileSelect('Loading profiles…'); }
     else renderProfileSelect();
-  }
-
-  // ── Native C7 tab-bar integration (mirrors Malpa Pick) ──────────────────────
-  // Re-show after the operator clicked away to a native C7 tab.
-  function showRoot() {
-    const tabBar     = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
-    const tabContent = document.querySelector('div.tab-content');
-    const r  = document.getElementById('mpp-root');
-    const li = document.getElementById('mpp-tab-li');
-    if (!r || !tabBar || !tabContent) return;
-    const prevLi    = tabBar.querySelector('li.nav-item.active:not(#mpp-tab-li)');
-    const prevPanel = tabContent.querySelector(':scope > .tab-pane.active:not(#mpp-root), :scope > tab.active');
-    if (prevLi)    _prevActiveLi    = prevLi;
-    if (prevPanel) _prevActivePanel = prevPanel;
-    _deactivateNative(tabBar, tabContent);
-    _minimizeSidebar();
-    r.classList.add('active'); r.style.display = 'flex';
-    if (li) { li.classList.add('active'); const la = li.querySelector('a'); if (la) { la.classList.add('active'); la.setAttribute('aria-selected', 'true'); } }
-    _mppViewVisible = true;
-    measureHeight();
-    _refocusScanInput();
-  }
-
-  // Step aside when the operator clicks a native C7 tab (Angular shows that pane).
-  function hideRoot() {
-    const r  = document.getElementById('mpp-root');
-    const li = document.getElementById('mpp-tab-li');
-    if (r) { r.classList.remove('active'); r.style.display = 'none'; }
-    if (li) { li.classList.remove('active'); const a = li.querySelector('a'); if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); } }
-    // Hand the native panes + sidebar back to C7 so its menus don't render blank.
-    _unsuppressNativePanes();
-    _restoreSidebar();
-    _mppViewVisible = false;
   }
 
   function closeUI() {
@@ -787,7 +750,6 @@
       if (panels && panels.length) { const last = panels[panels.length - 1]; last.classList.add('active'); last.style.display = ''; }
     }
     _prevActiveLi = null; _prevActivePanel = null;
-    _mppViewVisible = false;
     resetAll();
   }
 
@@ -1505,18 +1467,12 @@
   function attachNavClickListener() {
     if (_navClickAttached) return;
     _navClickAttached = true;
+    // Only our sidebar launcher opens the view (mirrors malpa-pick). We deliberately do
+    // NOT react to native tab / sidebar clicks: Pallet Pack is modal, so the operator
+    // closes it via the tab × or Esc; C7's own tabs are left entirely to C7.
     document.addEventListener('click', (e) => {
-      // Our sidebar launcher → open / re-show.
       const nav = document.getElementById('mpp-nav');
-      if (nav && (nav === e.target || nav.contains(e.target))) { e.preventDefault(); openUI(); return; }
-
-      // While our view is open, clicking any OTHER C7 tab or sidebar nav link should
-      // hide our view (C7 is switching to its own content) — same behaviour as Pack.
-      if (!document.getElementById('mpp-root') || !_mppViewVisible) return;
-      if (e.target.closest('#mpp-tab-li')) return;                       // our own tab — handled there
-      const otherTab = e.target.closest('ul.nav.nav-tabs[role="tablist"] li.nav-item');
-      const sideNav  = e.target.closest('div.sidebar a.nav-link, .sidebar a.nav-link, div.sidebar li.nav-item');
-      if (otherTab || sideNav) hideRoot();
+      if (nav && (nav === e.target || nav.contains(e.target))) { e.preventDefault(); openUI(); }
     }, true);
   }
 
