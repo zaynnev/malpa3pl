@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.3.3
+// @version      1.4.0
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -941,18 +941,21 @@
     let curUnits = 0; for (const v of Cache.current.lines.values()) curUnits += v;
     const boxes = curUnits > 0 ? [...Cache.containers, Cache.current] : [...Cache.containers];
 
+    // removals[] registers each editable (open-container) UOM row so its Remove
+    // button can unverify exactly one of that UOM (guide §13 correction).
+    const removals = [];
     const groups = [];
     boxes.forEach((box, idx) => {
+      const editable = box === Cache.current;   // only the open container is correctable
       const itemRows = [];
       for (const [id, base] of box.lines) {
         if (base <= 0) continue;
-        itemRows.push(itemScanRow(id, base));
+        itemRows.push(itemScanRow(id, base, editable, removals));
       }
       if (!itemRows.length) return;
-      const isOpen = box === Cache.current;
       const label = `Container ${idx + 1}` +
         (box.containerNo ? ` — ${_esc(box.containerNo)}` : '') +
-        (isOpen ? ' (open)' : '');
+        (editable ? ' (open)' : '');
       groups.push(`<div class="mpp-vs-group"><div class="mpp-vs-group-h">${label}</div>${itemRows.join('')}</div>`);
     });
 
@@ -976,15 +979,43 @@
       modal.remove();
       setTimeout(() => document.getElementById('mpp-scan-in')?.focus(), 40);
     });
+    // Remove (unverify) one of a UOM from the open container, then re-render.
+    modal.addEventListener('click', (e) => {
+      const btn = e.target.closest('.mpp-vs-rm');
+      if (!btn) return;
+      e.preventDefault();
+      const rm = removals[Number(btn.dataset.idx)];
+      if (rm) { unverify(rm.itemId, rm.factor); modal.remove(); showViewScanned(); }
+    });
+  }
+
+  // Unverify: remove one UOM's worth of base units (factor) of an item from the OPEN
+  // container, keeping the item total in sync (guide §13). Never goes below zero.
+  function unverify(itemId, factor) {
+    const cur = Cache.current;
+    const have = cur.lines.get(itemId) || 0;
+    const dec = Math.min(factor, have);
+    if (dec <= 0) return;
+    if (have - dec <= 0) cur.lines.delete(itemId);
+    else cur.lines.set(itemId, have - dec);
+    const it = Cache.items.get(itemId);
+    if (it) it.scannedBase = Math.max(0, it.scannedBase - dec);
+    updateScanScreenMeta();
+    vibrate([20]);
   }
   // One item = a small card: header (code + description, no qty), one row per UOM,
   // then a Total footer (guide §10).
-  function itemScanRow(id, base) {
+  function itemScanRow(id, base, editable, removals) {
     const it = Cache.items.get(id);
     const uomLines = uomParts(id, base).map(p => {
       const nm = _esc(_plural(p.name, p.count));
       const hint = p.factor > 1 ? ` <span class="mpp-vs-uom-f">(${p.factor} each)</span>` : '';
-      return `<div class="mpp-vs-uom"><span>${p.count} ${nm}${hint}</span></div>`;
+      let rm = '';
+      if (editable) {
+        const idx = removals.push({ itemId: id, factor: p.factor }) - 1;
+        rm = `<button class="mpp-vs-rm" data-idx="${idx}" title="Remove one ${_esc(p.name)}">Remove</button>`;
+      }
+      return `<div class="mpp-vs-uom"><span>${p.count} ${nm}${hint}</span>${rm}</div>`;
     }).join('');
     return `<div class="mpp-vs-item">
         <div class="mpp-vs-item-h"><b>${_esc(it?.itemCode || id)}</b> ${_esc(it?.description || '')}</div>
@@ -1091,6 +1122,7 @@
     noIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); refreshType(); document.getElementById('mpp-cc-wt')?.focus(); } });
 
     document.getElementById('mpp-cc-cancel')?.addEventListener('click', () => {
+      document.activeElement?.blur();   // dismiss the soft keyboard from weight/dims/number fields
       modal.remove();
       setTimeout(() => document.getElementById('mpp-scan-in')?.focus(), 40);
     });
@@ -1125,6 +1157,7 @@
       Cache.containers.push(Cache.current);
       Cache.current = newContainer(Cache.containers.length + 1);
 
+      document.activeElement?.blur();   // dismiss the soft keyboard from weight/dims fields
       modal.remove();
       Audio.chime('ok');
       updateScanScreenMeta();
@@ -1674,8 +1707,13 @@
       .mpp-vs-item{display:flex;flex-direction:column;gap:2px;
         padding:8px 12px;background:var(--c7-bg);border-radius:var(--c7-r)}
       .mpp-vs-item-h{font-size:15px;color:var(--c7-text);line-height:1.3}
-      .mpp-vs-uom{font-size:14px;color:var(--c7-muted2);padding-left:10px}
+      .mpp-vs-uom{display:flex;align-items:center;justify-content:space-between;gap:8px;
+        font-size:14px;color:var(--c7-muted2);padding-left:10px}
       .mpp-vs-uom-f{color:var(--c7-muted)}
+      .mpp-vs-rm{flex-shrink:0;background:var(--c7-surf);border:1px solid var(--c7-border2);
+        color:var(--c7-red);border-radius:4px;font-size:12px;font-weight:600;
+        padding:3px 10px;min-height:30px;cursor:pointer}
+      .mpp-vs-rm:hover{background:#fff3f3}
       .mpp-vs-total{display:flex;justify-content:space-between;font-size:14px;font-weight:700;
         color:var(--c7-text);border-top:1px solid var(--c7-border);margin-top:3px;padding-top:4px}
       /* View-scanned per-container grouping */
