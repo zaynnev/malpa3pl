@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.5
+// @version      1.2.6
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -637,11 +637,33 @@
       const a = li.querySelector('a.nav-link');
       if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); }
     });
+    // Hide native panes with inline display:none ONLY — keep their `active` class so
+    // Angular's router state is untouched. Clearing the inline display later then makes
+    // the still-active pane visible again immediately, with no dependence on Angular
+    // re-activating it (removing `active` here left the pane blank after we stepped
+    // aside, because Angular thought it was already active and never re-rendered it).
     tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane').forEach(p => {
       if (p.id === 'mpp-root') return;
-      p.classList.remove('active');
       p.style.display = 'none';
     });
+  }
+
+  // Reverse _deactivateNative's inline display:none on EVERY native pane, so that once
+  // we step aside, C7/Angular's own .active class controls visibility again. Without
+  // this the native menus render blank after using Pallet Pack — the sticky inline
+  // display:none overrides C7's .tab-pane.active{display:block}.
+  function _unsuppressNativePanes() {
+    const tabContent = document.querySelector('div.tab-content');
+    if (!tabContent) return;
+    tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane').forEach(p => {
+      if (p.id === 'mpp-root') return;
+      p.style.display = '';
+    });
+  }
+  function _minimizeSidebar() { document.body.classList.add('sidebar-minimized', 'brand-minimized'); }
+  function _restoreSidebar() {
+    if (!_mppSidebarWasMin) document.body.classList.remove('sidebar-minimized');
+    if (!_mppBrandWasMin)   document.body.classList.remove('brand-minimized');
   }
 
   function openUI() {
@@ -713,6 +735,7 @@
     if (prevLi)    _prevActiveLi    = prevLi;
     if (prevPanel) _prevActivePanel = prevPanel;
     _deactivateNative(tabBar, tabContent);
+    _minimizeSidebar();
     r.classList.add('active'); r.style.display = 'flex';
     if (li) { li.classList.add('active'); const la = li.querySelector('a'); if (la) { la.classList.add('active'); la.setAttribute('aria-selected', 'true'); } }
     _mppViewVisible = true;
@@ -726,6 +749,9 @@
     const li = document.getElementById('mpp-tab-li');
     if (r) { r.classList.remove('active'); r.style.display = 'none'; }
     if (li) { li.classList.remove('active'); const a = li.querySelector('a'); if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); } }
+    // Hand the native panes + sidebar back to C7 so its menus don't render blank.
+    _unsuppressNativePanes();
+    _restoreSidebar();
     _mppViewVisible = false;
   }
 
@@ -733,11 +759,14 @@
     document.removeEventListener('keydown', onGlobalKey, true);
     window.removeEventListener('resize', measureHeight);
     // Restore the sidebar to its pre-open state — only undo classes we added.
-    if (!_mppSidebarWasMin) document.body.classList.remove('sidebar-minimized');
-    if (!_mppBrandWasMin)   document.body.classList.remove('brand-minimized');
+    _restoreSidebar();
 
     document.getElementById('mpp-tab-li')?.remove();
     document.getElementById('mpp-root')?.remove();
+
+    // Clear the inline display:none we put on every native pane, so any C7 menu the
+    // operator opens next isn't stuck blank — then re-activate the prior one below.
+    _unsuppressNativePanes();
 
     // Restore exactly the tab + pane that were active before we opened.
     if (_prevActiveLi && document.contains(_prevActiveLi)) {
@@ -1637,6 +1666,9 @@
       #mpp-tab-li .mpp-tab-x{margin-left:10px;font-size:16px;line-height:1;opacity:.65;
         cursor:pointer;padding:0 2px;border-radius:3px}
       #mpp-tab-li .mpp-tab-x:hover{opacity:1;background:rgba(0,0,0,.08)}
+      /* Centre the shipment-scan field's placeholder + typed value. */
+      #mpp-ship-in{text-align:center}
+      #mpp-ship-in::placeholder{text-align:center}
     `;
     document.head.appendChild(style);
   }
