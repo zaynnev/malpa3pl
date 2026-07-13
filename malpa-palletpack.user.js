@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.9
+// @version      1.3.0
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -526,6 +526,8 @@
           requiredBase: 0,
           scannedBase: 0,
           unitWeight: computeUnitWeight(uoms),
+          // UOMs (factor + name) for the View Scanned breakdown, e.g. "1 Carton of 6".
+          uoms: uoms.map(u => ({ factor: num(u.factor) || 1, name: u.unitOfMeasure?.name || '' })),
         };
         Cache.items.set(itemId, entry);
       }
@@ -981,18 +983,25 @@
         <span>${base}${breakdown ? ` (${breakdown})` : ''}</span>
       </div>`;
   }
+  // Naive English pluraliser: "Carton"→"Cartons", "Box"→"Boxes", "each"→"eaches".
+  function _plural(word, n) {
+    if (n === 1 || !word) return word;
+    return /([sxz]|[cs]h)$/i.test(word) ? word + 'es' : word + 's';
+  }
+  // Friendly UOM breakdown, e.g. "1 Carton of 6 + 2 eaches of 1" (guide §10).
   function uomBreakdown(itemId, base) {
-    // Find the largest outer factor for this item from barcodeIndex
-    let maxFactor = 1;
-    for (const v of Cache.barcodeIndex.values()) {
-      if (v.itemId === itemId && v.factor > maxFactor) maxFactor = v.factor;
+    const it = Cache.items.get(itemId);
+    // Largest outer UOM (factor > 1) for this item.
+    let outer = null;
+    for (const u of (it?.uoms || [])) {
+      if (u.factor > 1 && (!outer || u.factor > outer.factor)) outer = u;
     }
-    if (maxFactor <= 1 || base < maxFactor) return '';
-    const outers = Math.floor(base / maxFactor);
-    const eaches = base % maxFactor;
+    if (!outer || base < outer.factor) return '';
+    const nOuter = Math.floor(base / outer.factor);
+    const eaches = base % outer.factor;
     const parts = [];
-    if (outers) parts.push(`${outers}×${maxFactor}`);
-    if (eaches) parts.push(`${eaches}×1`);
+    if (nOuter) parts.push(`${nOuter} ${_plural(outer.name || 'outer', nOuter)} of ${outer.factor}`);
+    if (eaches) parts.push(`${eaches} ${_plural('each', eaches)} of 1`);
     return parts.join(' + ');
   }
 
