@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.3.0
+// @version      1.3.1
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -980,7 +980,7 @@
     const breakdown = uomBreakdown(id, base);   // friendly UOM breakdown (guide §10)
     return `<div class="mpp-vs-row">
         <span><b>${_esc(it?.itemCode || id)}</b> ${_esc(it?.description || '')}</span>
-        <span>${base}${breakdown ? ` (${breakdown})` : ''}</span>
+        <span>Qty - ${base}${breakdown ? ` (${breakdown})` : ''}</span>
       </div>`;
   }
   // Naive English pluraliser: "Carton"→"Cartons", "Box"→"Boxes", "each"→"eaches".
