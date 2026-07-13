@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.3.2
+// @version      1.3.3
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -977,34 +977,41 @@
       setTimeout(() => document.getElementById('mpp-scan-in')?.focus(), 40);
     });
   }
+  // One item = a small card: header (code + description, no qty), one row per UOM,
+  // then a Total footer (guide §10).
   function itemScanRow(id, base) {
     const it = Cache.items.get(id);
-    const breakdown = uomBreakdown(id, base);   // friendly UOM breakdown (guide §10)
-    return `<div class="mpp-vs-row">
-        <span><b>${_esc(it?.itemCode || id)}</b> ${_esc(it?.description || '')}</span>
-        <span>Qty - ${base}${breakdown ? ` (${breakdown})` : ''}</span>
+    const uomLines = uomParts(id, base).map(p => {
+      const nm = _esc(_plural(p.name, p.count));
+      const hint = p.factor > 1 ? ` <span class="mpp-vs-uom-f">(${p.factor} each)</span>` : '';
+      return `<div class="mpp-vs-uom"><span>${p.count} ${nm}${hint}</span></div>`;
+    }).join('');
+    return `<div class="mpp-vs-item">
+        <div class="mpp-vs-item-h"><b>${_esc(it?.itemCode || id)}</b> ${_esc(it?.description || '')}</div>
+        ${uomLines}
+        <div class="mpp-vs-total"><span>Total</span><span>${base}</span></div>
       </div>`;
   }
-  // Naive English pluraliser: "Carton"→"Cartons", "Box"→"Boxes", "each"→"eaches".
+  // Naive English pluraliser: "Carton"→"Cartons", "Box"→"Boxes", "Each"→"Eaches".
   function _plural(word, n) {
     if (n === 1 || !word) return word;
     return /([sxz]|[cs]h)$/i.test(word) ? word + 'es' : word + 's';
   }
-  // Friendly UOM breakdown, e.g. "1 Carton of 6 + 2 eaches of 1" (guide §10).
-  function uomBreakdown(itemId, base) {
+  // Break a base-unit total into UOM rows — largest factor first, remainder as base
+  // units. Returns [{count, name, factor}] (guide §10).
+  function uomParts(itemId, base) {
     const it = Cache.items.get(itemId);
-    // Largest outer UOM (factor > 1) for this item.
-    let outer = null;
-    for (const u of (it?.uoms || [])) {
-      if (u.factor > 1 && (!outer || u.factor > outer.factor)) outer = u;
-    }
-    if (!outer || base < outer.factor) return '';
-    const nOuter = Math.floor(base / outer.factor);
-    const eaches = base % outer.factor;
+    const uoms = (it?.uoms || []).slice().sort((a, b) => b.factor - a.factor);
+    const baseName = (uoms.find(u => u.factor === 1) || {}).name || 'Each';
     const parts = [];
-    if (nOuter) parts.push(`${nOuter} ${_plural(outer.name || 'outer', nOuter)} of ${outer.factor}`);
-    if (eaches) parts.push(`${eaches} ${_plural('each', eaches)} of 1`);
-    return parts.join(' + ');
+    let rem = base;
+    for (const u of uoms) {
+      if (u.factor <= 1) continue;
+      const n = Math.floor(rem / u.factor);
+      if (n > 0) { parts.push({ count: n, name: u.name || 'Unit', factor: u.factor }); rem -= n * u.factor; }
+    }
+    if (rem > 0 || parts.length === 0) parts.push({ count: rem, name: baseName, factor: 1 });
+    return parts;
   }
 
   // ===========================================================================
@@ -1659,10 +1666,18 @@
       .mpp-modal .mpp-grid2 .mpp-input{min-height:42px;font-size:16px;padding:6px 10px}
       .mpp-modal .mpp-btn{min-height:48px;font-size:16px}
       .mpp-modal .mpp-fb{min-height:0}
-      .mpp-vs-list{display:flex;flex-direction:column;gap:5px;margin:2px 0}
+      .mpp-vs-list{display:flex;flex-direction:column;gap:6px;margin:2px 0}
       .mpp-vs-row{display:flex;justify-content:space-between;gap:10px;font-size:15px;
         padding:8px 12px;background:var(--c7-bg);border-radius:var(--c7-r);color:var(--c7-text)}
       .mpp-vs-bad{border-left:3px solid var(--c7-red);background:#fff3f3}
+      /* Per-item card: header, one row per UOM, Total footer */
+      .mpp-vs-item{display:flex;flex-direction:column;gap:2px;
+        padding:8px 12px;background:var(--c7-bg);border-radius:var(--c7-r)}
+      .mpp-vs-item-h{font-size:15px;color:var(--c7-text);line-height:1.3}
+      .mpp-vs-uom{font-size:14px;color:var(--c7-muted2);padding-left:10px}
+      .mpp-vs-uom-f{color:var(--c7-muted)}
+      .mpp-vs-total{display:flex;justify-content:space-between;font-size:14px;font-weight:700;
+        color:var(--c7-text);border-top:1px solid var(--c7-border);margin-top:3px;padding-top:4px}
       /* View-scanned per-container grouping */
       .mpp-vs-group{display:flex;flex-direction:column;gap:5px}
       .mpp-vs-group-h{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
