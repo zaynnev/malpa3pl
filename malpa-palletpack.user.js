@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.2.8
+// @version      1.2.9
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -869,7 +869,7 @@
         <div class="mpp-scan-zone" id="mpp-scan-zone">
           <div class="mpp-scan-zone-label">Scan items</div>
           <div class="mpp-scan-arrows">&gt;&gt;&gt;</div>
-          <input id="mpp-scan-in" class="mpp-scan" type="text" inputmode="none" readonly
+          <input id="mpp-scan-in" class="mpp-scan" type="text" inputmode="none"
                  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
         </div>
         <div class="mpp-scan-meta" id="mpp-scan-meta"></div>
@@ -881,18 +881,17 @@
       </div>`;
     wireHeader();
     const inp = document.getElementById('mpp-scan-in');
-    // The input is `readonly` so the TC51 never pops the soft keyboard (inputmode="none"
-    // isn't honoured on its Firefox). A readonly input still receives keydown events, so
-    // we accumulate the hardware scanner's characters ourselves and submit on Enter.
-    let scanBuf = '';
+    // Value-based capture: the hardware scanner types into the field and the browser
+    // composes the correct text in .value (reconstructing from keydown e.key is wrong —
+    // the scanner reports shifted glyphs, e.g. "-"→"_", "0"→")"). The field is full-size
+    // but visually transparent (see CSS) so Firefox honours inputmode="none" and keeps
+    // the soft keyboard down — a 1×1 hidden input did not.
     inp?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.keyCode === 13) {
         e.preventDefault();
-        const v = scanBuf.trim();
-        scanBuf = '';
+        const v = inp.value.trim();
+        inp.value = '';
         if (v) onScan(v);
-      } else if (e.key && e.key.length === 1) {
-        scanBuf += e.key;   // printable char from the scanner
       }
     });
     document.getElementById('mpp-view-btn')?.addEventListener('click', showViewScanned);
@@ -1603,24 +1602,35 @@
       .mpp-fb.ok{color:var(--c7-green)}.mpp-fb.err{color:var(--c7-red)}.mpp-fb.dim{color:var(--c7-muted)}
       .mpp-grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
       .mpp-grid2>*{min-width:0}
-      /* ── scan screen ── */
-      .mpp-scan-body{gap:12px}
-      .mpp-container-badge{align-self:center;background:var(--c7-surf3);border:1px solid var(--c7-border);
+      /* ── scan screen (flex column that never scrolls: the zone shrinks/grows, the
+         badge/meta/buttons keep their size, so all three buttons stay on-screen) ── */
+      .mpp-scan-body{gap:12px;overflow:hidden}
+      .mpp-container-badge{align-self:center;flex-shrink:0;background:var(--c7-surf3);border:1px solid var(--c7-border);
         padding:6px 16px;border-radius:20px;font-weight:700;font-size:16px;color:var(--c7-teal)}
-      .mpp-scan-zone{position:relative;border:2px dashed var(--c7-border2);border-radius:8px;
-        padding:22px 16px;text-align:center;background:var(--c7-bg);transition:background .12s,border-color .12s}
+      .mpp-scan-zone{position:relative;flex:1;min-height:80px;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;
+        border:2px dashed var(--c7-border2);border-radius:8px;
+        padding:12px 16px;text-align:center;background:var(--c7-bg);transition:background .12s,border-color .12s}
       .mpp-scan-zone.mpp-flash{background:var(--c7-green-bg);border-color:var(--c7-green-bd)}
       .mpp-scan-zone-label{font-size:20px;font-weight:700;color:var(--c7-text)}
       .mpp-scan-arrows{font-size:28px;color:var(--c7-teal);letter-spacing:4px;margin-top:8px}
-      .mpp-scan{position:absolute;opacity:0;left:0;top:0;width:1px;height:1px;border:0;padding:0}
-      input.mpp-scan.mpp-input{position:static;opacity:1;width:100%;height:auto}
-      .mpp-scan-meta{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+      /* Capture input fills the zone, focusable but with invisible content (blind scan);
+         full-size (not 1×1) so Firefox keeps the soft keyboard down. */
+      .mpp-scan{position:absolute;inset:0;width:100%;height:100%;opacity:1;border:0;margin:0;padding:0;
+        background:transparent;color:transparent;caret-color:transparent;text-align:center;
+        font-size:16px;outline:none}
+      input.mpp-scan.mpp-input{position:static;inset:auto;width:100%;height:auto;font-size:22px;
+        background:var(--c7-bg);color:var(--c7-text);caret-color:auto}
+      .mpp-scan-meta{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;flex-shrink:0}
       .mpp-meta-pill{background:var(--c7-surf2);border:1px solid var(--c7-border);border-radius:16px;
         padding:8px 14px;font-size:14px;color:var(--c7-muted2)}
-      .mpp-scan-actions{display:flex;flex-direction:column;gap:10px;margin-top:auto}
+      .mpp-scan-actions{display:flex;flex-direction:column;gap:10px;flex-shrink:0}
       /* ── overlay + modal (light) ── */
-      .mpp-overlay{position:absolute;inset:0;z-index:10;background:rgba(57,73,103,.45);
-        display:flex;align-items:center;justify-content:center;padding:16px}
+      /* Anchored to the VIEWPORT (not the panel) so the modal always centres in the
+         visible screen and never falls below the fold — position:absolute centred it in
+         the full panel height, which exceeds the visible area under Firefox's URL bar. */
+      .mpp-overlay{position:fixed;inset:0;z-index:100000;background:rgba(57,73,103,.45);
+        display:flex;align-items:center;justify-content:center;padding:12px}
       .mpp-modal{width:100%;max-width:440px;max-height:94%;overflow:hidden auto;background:var(--c7-surf);
         border:1px solid var(--c7-border2);border-radius:8px;padding:16px;box-sizing:border-box;
         display:flex;flex-direction:column;gap:10px;box-shadow:0 12px 40px rgba(57,73,103,.25)}
