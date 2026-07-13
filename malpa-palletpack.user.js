@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.3.1
+// @version      1.3.2
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -865,7 +865,7 @@
     if (!Cache.current) Cache.current = newContainer(1);
     const r = root(); if (!r) return;
     r.innerHTML = `
-      ${header('Pallet Pack', 'Shipment: ' + _esc(Cache.shipmentNumber))}
+      ${header(Cache.shipmentNumber, '')}
       <div class="mpp-body mpp-scan-body">
         <div class="mpp-container-badge" id="mpp-container-badge">Container ${Cache.containers.length + 1}</div>
         <div class="mpp-scan-zone" id="mpp-scan-zone">
@@ -877,8 +877,10 @@
         <div class="mpp-scan-meta" id="mpp-scan-meta"></div>
         <div class="mpp-scan-actions">
           <button id="mpp-view-btn" class="mpp-btn mpp-btn-ghost">View scanned</button>
-          <button id="mpp-close-container-btn" class="mpp-btn mpp-btn-secondary">Close Container</button>
-          <button id="mpp-finish-btn" class="mpp-btn mpp-btn-primary">Finish Verification</button>
+          <div class="mpp-scan-actions-row">
+            <button id="mpp-close-container-btn" class="mpp-btn mpp-btn-secondary">Close Container</button>
+            <button id="mpp-finish-btn" class="mpp-btn mpp-btn-primary">Finish Verification</button>
+          </div>
         </div>
       </div>`;
     wireHeader();
@@ -916,8 +918,8 @@
     let curUnits = 0;
     for (const v of Cache.current.lines.values()) curUnits += v;
     el.innerHTML =
-      `<span class="mpp-meta-pill">This box: ${curUnits} unit${curUnits === 1 ? '' : 's'}</span>` +
-      `<span class="mpp-meta-pill">Boxes closed: ${Cache.containers.length}</span>`;
+      `<span class="mpp-meta-pill">This container: ${curUnits} unit${curUnits === 1 ? '' : 's'}</span>` +
+      `<span class="mpp-meta-pill">Containers closed: ${Cache.containers.length}</span>`;
     const badge = document.getElementById('mpp-container-badge');
     if (badge) badge.textContent = `Container ${Cache.containers.length + 1}`;
   }
@@ -1029,7 +1031,7 @@
         <div class="mpp-modal-title">Close Container ${Cache.containers.length + 1}</div>
         <label class="mpp-label">Container number</label>
         <input id="mpp-cc-no" class="mpp-input" type="text" autocomplete="off"
-               placeholder="Scan / type tote or box label" />
+               placeholder="Scan / type container label" />
         <div id="mpp-cc-type" class="mpp-fb dim"></div>
         <div id="mpp-cc-type-picker-wrap" style="display:none">
           <label class="mpp-label">Container type</label>
@@ -1570,7 +1572,7 @@
         min-height:44px;padding:6px 12px 6px 16px;flex-shrink:0;
         box-shadow:inset 0 -2px 0 var(--mp-brand,#6fc3eb)}
       .mpp-header>div:first-child{min-width:0;flex:1}
-      .mpp-title{font-size:17px;font-weight:600;color:var(--c7-text)}
+      .mpp-title{font-size:17px;font-weight:700;color:var(--c7-text);overflow-wrap:anywhere}
       .mpp-subtitle{font-size:13px;color:var(--c7-muted);margin-top:2px;
         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .mpp-x{background:none;border:none;color:var(--c7-muted2);font-size:20px;cursor:pointer;
@@ -1634,6 +1636,11 @@
       .mpp-meta-pill{background:var(--c7-surf2);border:1px solid var(--c7-border);border-radius:16px;
         padding:8px 14px;font-size:14px;color:var(--c7-muted2)}
       .mpp-scan-actions{display:flex;flex-direction:column;gap:10px;flex-shrink:0}
+      /* Close Container + Finish Verification sit side by side to save vertical space;
+         allow the labels to wrap to two lines so they fit at narrow (TC51) widths. */
+      .mpp-scan-actions-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+      .mpp-scan-actions-row>*{min-width:0}
+      .mpp-scan-actions-row .mpp-btn{white-space:normal;line-height:1.15;font-size:15px}
       /* ── overlay + modal (light) ── */
       /* Anchored to the VIEWPORT (not the panel) so the modal always centres in the
          visible screen and never falls below the fold — position:absolute centred it in
