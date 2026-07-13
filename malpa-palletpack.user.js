@@ -1013,7 +1013,7 @@
       let rm = '';
       if (editable) {
         const idx = removals.push({ itemId: id, factor: p.factor }) - 1;
-        rm = `<button class="mpp-vs-rm" data-idx="${idx}" title="Remove one ${_esc(p.name)}">Remove</button>`;
+        rm = `<button class="mpp-vs-rm" data-idx="${idx}" title="Unverify one ${_esc(p.name)}">Unverify</button>`;
       }
       return `<div class="mpp-vs-uom"><span>${p.count} ${nm}${hint}</span>${rm}</div>`;
     }).join('');
