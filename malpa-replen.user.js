@@ -7,8 +7,8 @@
 // @grant        none
 // @homepageURL  https://github.com/zaynnev/malpa3pl
 // @supportURL   https://github.com/zaynnev/malpa3pl/issues
-// @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen-qty.user.js
-// @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen-qty.user.js
+// @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen.user.js
+// @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen.user.js
 // ==/UserScript==
 
 (function () {
