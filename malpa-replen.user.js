@@ -1,10 +1,14 @@
 // ==UserScript==
 // @name         Malpa C7 - Replen Early Qty
 // @namespace    malpa
-// @version      4.0
-// @description  Shows the replenishment-detail qty-to-move under the Description as soon as the job loads, matched to the assigned job.
+// @version      4.1
+// @description  Shows replenishment qty-to-move + To Location before scanning, and keeps the Confirm Units field editable so a changed qty is submitted.
 // @match        https://malpa.canary7.com/*
 // @grant        none
+// @homepageURL  https://github.com/zaynnev/malpa3pl
+// @supportURL   https://github.com/zaynnev/malpa3pl/issues
+// @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen-qty.user.js
+// @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen-qty.user.js
 // ==/UserScript==
 
 (function () {
@@ -212,16 +216,18 @@
       const qty = qtyOf(row);
       const uom = uomOf(row);
       const toLoc = (row.toLocation && row.toLocation.location_code) || '';
+      const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
+      // Wrapper is display:contents so the two rows sit in flow exactly like the
+      // native fields; each row reuses C7's own .form-group markup + <strong> so
+      // it inherits the site's colour, weight and spacing (no custom styling).
       const line = document.createElement('div');
       line.id = QTY_ID;
-      line.className = 'form-group ng-star-inserted';
       line.dataset.key = key;
-      line.style.fontWeight = 'bold';
-      line.style.fontSize = '1.1em';
+      line.style.display = 'contents';
       line.innerHTML =
-        '<div style="color:#c0392b;">Qty to move : <strong>' + qty + ' \u00D7 ' + uom + '</strong></div>' +
-        (toLoc ? '<div style="color:#243b53;margin-top:2px;">To Location : <strong>' + toLoc + '</strong></div>' : '');
+        '<div class="form-group ng-star-inserted">Qty to move : <strong>' + esc(qty) + ' \u00D7 ' + esc(uom) + '</strong></div>' +
+        (toLoc ? '<div class="form-group ng-star-inserted">To Location : <strong>' + esc(toLoc) + '</strong></div>' : '');
 
       anchor.parentNode.insertBefore(line, anchor.nextSibling);
       console.log(TAG, 'Qty line added:', qty, uom, 'to', toLoc, '(job', row.job_id + ', item', (row.item && row.item.item_code) + ')');
