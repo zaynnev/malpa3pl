@@ -1,155 +1,243 @@
 // ==UserScript==
-// @name         Malpa OpenReplay Ingest Redirect
-// @namespace    malpa.openreplay
-// @version      0.3.0
-// @description  Redirect Canary7's built-in OpenReplay tracker to Malpa's self-hosted box (host + project-key swap), including the Web Worker that uploads session data.
+// @name         Malpa C7 - Replen Early Qty
+// @namespace    malpa
+// @version      4.1
+// @description  Shows replenishment qty-to-move + To Location before scanning, and keeps the Confirm Units field editable so a changed qty is submitted.
 // @match        https://malpa.canary7.com/*
-// @match        https://*.canary7.com/*
-// @run-at       document-start
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-openreplay.user.js
-// @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-openreplay.user.js
+// @homepageURL  https://github.com/zaynnev/malpa3pl
+// @supportURL   https://github.com/zaynnev/malpa3pl/issues
+// @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen-qty.user.js
+// @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-replen-qty.user.js
 // ==/UserScript==
-
-/*
- * WHAT THIS DOES
- * --------------
- * Canary7 embeds the OpenReplay tracker on every page. It targets the dead host
- * openreplay.canary7.com using C7's own (rejected) project key. OpenReplay allows
- * only ONE tracker per page, so we can't run our own. Instead we hijack C7's
- * existing tracker traffic and point it at our self-hosted box:
- *
- *   1. HOST swap:  openreplay.canary7.com  ->  replay.malpasoft.com   (everywhere)
- *   2. KEY  swap:  in /ingest/v1/web/start body, C7's key -> ours
- *
- * IMPORTANT: OpenReplay uploads the actual session data (/ingest/v1/web/i) from a
- * Web Worker, which has its own JS global. Patching window.fetch/XHR only covers
- * the main thread (start, feature-flags). To catch the worker's uploads we also:
- *   - rewrite the host in Worker.postMessage payloads (where the ingest URL is
- *     handed to the worker), and
- *   - rewrite the host inside any Blob used to build the worker.
- *
- * Everything else C7 sends (userUUID, userID, trackerVersion, token, batches) is
- * passed through untouched.
- *
- * VERSION NOTE: C7 ships tracker v11.0.6; our backend is current. Session starts
- * fine; replay fidelity depends on backend/tracker compatibility — verify with a
- * real recorded session.
- */
 
 (function () {
   'use strict';
 
-  var OLD_HOST = 'openreplay.canary7.com';
-  var NEW_HOST = 'replay.malpasoft.com';
-  var C7_KEY   = 'iAlX3UIW9hXkdmw9uho1';   // Canary7's baked-in key (rejected by our server)
-  var OUR_KEY  = 'XM93gZiNw5XkowtXrvvO';   // Malpa self-hosted project key
-  var TAG      = '[Malpa OR Redirect]';
+  const TAG = '[Malpa Replen]';
+  const QTY_ID = 'malpa-qty-line';
 
-  function swapHost(s) {
-    return (typeof s === 'string' && s.indexOf(OLD_HOST) !== -1)
-      ? s.split(OLD_HOST).join(NEW_HOST)
-      : s;
+  const jobsById = {};       // every get-replenishment-jobs row, keyed by row id
+  let currentJobId = null;   // job_id from the latest assign-replenishment-job call
+
+  console.log(TAG, 'script loaded');
+
+  // ---------------------------------------------------------------------------
+  // 1. NETWORK: cache the job list + track the assigned job_id
+  // ---------------------------------------------------------------------------
+  function cacheJobs(data) {
+    if (!Array.isArray(data)) return;
+    data.forEach(j => { if (j && j.id != null) jobsById[j.id] = j; });
+    console.log(TAG, 'cached', data.length, 'jobs (total known:', Object.keys(jobsById).length + ')');
   }
 
-  function rewriteUrl(url) {
-    var out = swapHost(url);
-    if (out !== url) console.log(TAG, 'url', url, '->', out);
-    return out;
-  }
-
-  // Swap the project key inside the /start body (JSON string).
-  function rewriteBody(url, body) {
-    try {
-      if (typeof body === 'string'
-          && String(url).indexOf('/ingest/v1/web/start') !== -1
-          && body.indexOf(C7_KEY) !== -1) {
-        console.log(TAG, 'swapped projectKey in start body');
-        return body.split(C7_KEY).join(OUR_KEY);
-      }
-    } catch (e) {}
-    return body;
-  }
-
-  // Recursively swap the host in a postMessage payload (string / array / object).
-  function deepSwap(obj) {
-    try {
-      if (typeof obj === 'string') return swapHost(obj);
-      if (Array.isArray(obj)) { for (var i = 0; i < obj.length; i++) obj[i] = deepSwap(obj[i]); return obj; }
-      if (obj && typeof obj === 'object') {
-        for (var k in obj) { if (Object.prototype.hasOwnProperty.call(obj, k)) obj[k] = deepSwap(obj[k]); }
-      }
-    } catch (e) {}
-    return obj;
-  }
-
-  // --- MAIN THREAD: XMLHttpRequest ---
-  var _open = XMLHttpRequest.prototype.open;
-  var _send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (method, url) {
-    arguments[1] = rewriteUrl(url);
-    this.__orUrl = arguments[1];
-    return _open.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function (body) {
-    try { if (typeof body === 'string') arguments[0] = rewriteBody(this.__orUrl, body); } catch (e) {}
-    return _send.apply(this, arguments);
-  };
-
-  // --- MAIN THREAD: fetch ---
-  if (window.fetch) {
-    var _fetch = window.fetch;
-    window.fetch = function (input, init) {
-      try {
-        var url = (typeof input === 'string') ? input : (input && input.url);
-        var newUrl = rewriteUrl(url);
-        if (init && typeof init.body === 'string') {
-          init = Object.assign({}, init, { body: rewriteBody(newUrl, init.body) });
-        }
-        if (typeof input === 'string') input = newUrl;
-        else if (input && input.url && newUrl !== input.url) input = new Request(newUrl, input);
-      } catch (e) {}
-      return _fetch.call(this, input, init);
-    };
-  }
-
-  // --- MAIN THREAD: sendBeacon ---
-  if (navigator.sendBeacon) {
-    var _beacon = navigator.sendBeacon.bind(navigator);
-    navigator.sendBeacon = function (url, data) { return _beacon(rewriteUrl(url), data); };
-  }
-
-  // --- WORKER: rewrite the ingest URL handed to the worker via postMessage ---
-  if (window.Worker && Worker.prototype && Worker.prototype.postMessage) {
-    var _post = Worker.prototype.postMessage;
-    Worker.prototype.postMessage = function (msg, transfer) {
-      try {
-        var swapped = deepSwap(msg);
-        console.log(TAG, 'worker postMessage scanned');
-        return _post.call(this, swapped, transfer);
-      } catch (e) { return _post.call(this, msg, transfer); }
-    };
-  }
-
-  // --- WORKER: rewrite the host inside any Blob used to build the worker ---
-  try {
-    var NativeBlob = window.Blob;
-    function PatchedBlob(parts, options) {
-      try {
-        if (Array.isArray(parts)) {
-          for (var i = 0; i < parts.length; i++) {
-            if (typeof parts[i] === 'string' && parts[i].indexOf(OLD_HOST) !== -1) {
-              parts[i] = swapHost(parts[i]);
-              console.log(TAG, 'rewrote host inside a Blob (worker code)');
-            }
-          }
-        }
-      } catch (e) {}
-      return new NativeBlob(parts, options);
+  function noteAssign(url) {
+    const m = url && url.match(/[?&]job_id=(\d+)/);
+    if (m) {
+      currentJobId = parseInt(m[1], 10);
+      console.log(TAG, 'assigned job_id =', currentJobId);
+      const l = document.getElementById(QTY_ID);
+      if (l) l.remove(); // force redraw for the new job
     }
-    PatchedBlob.prototype = NativeBlob.prototype;
-    window.Blob = PatchedBlob;
-  } catch (e) {}
+  }
 
-  console.log(TAG, 'v0.3.0 active — host', OLD_HOST, '=>', NEW_HOST, '| key swap on start | worker covered');
+  const origOpen = XMLHttpRequest.prototype.open;
+  const origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (m, url) {
+    this.__malpaUrl = url;
+    if (url && url.indexOf('assign-replenishment-job') !== -1) noteAssign(url);
+    return origOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    this.addEventListener('load', function () {
+      try {
+        if (this.__malpaUrl && this.__malpaUrl.indexOf('get-replenishment-jobs') !== -1) {
+          cacheJobs(JSON.parse(this.responseText));
+        }
+      } catch (e) {}
+    });
+    return origSend.apply(this, arguments);
+  };
+
+  const origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = function (...args) {
+      try {
+        const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
+        if (url && url.indexOf('assign-replenishment-job') !== -1) noteAssign(url);
+      } catch (e) {}
+      return origFetch.apply(this, args).then((res) => {
+        try {
+          const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url);
+          if (url && url.indexOf('get-replenishment-jobs') !== -1) {
+            res.clone().json().then(cacheJobs).catch(() => {});
+          }
+        } catch (e) {}
+        return res;
+      });
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2. DOM HELPERS
+  // ---------------------------------------------------------------------------
+  function findByLabel(prefix) {
+    const p = prefix.toLowerCase().replace(/\s+/g, ' ');
+    let best = null, bestLen = Infinity;
+    const els = document.querySelectorAll('div, label, span, strong, p, dt, dd');
+    for (const el of els) {
+      const t = el.textContent.trim().replace(/\s+/g, ' ').toLowerCase();
+      if (t.startsWith(p)) {
+        const len = el.textContent.trim().length;
+        if (len < bestLen) { best = el; bestLen = len; }
+      }
+    }
+    return best;
+  }
+
+  function valueOf(el, prefix) {
+    if (!el) return null;
+    const strong = el.querySelector('strong');
+    if (strong && strong.textContent.trim()) return strong.textContent.trim();
+    return el.textContent.trim().slice(prefix.length).replace(/^[\s:]+/, '').trim();
+  }
+
+  // Smallest element whose text CONTAINS the label (handles the label being a
+  // raw text node, e.g. Item + Description sharing one form-group block).
+  function findContainer(substr) {
+    const s = substr.toLowerCase().replace(/\s+/g, ' ');
+    let best = null, bestLen = Infinity;
+    const els = document.querySelectorAll('div, label, span, strong, p, dt, dd');
+    for (const el of els) {
+      const t = el.textContent.replace(/\s+/g, ' ').toLowerCase();
+      if (t.includes(s)) {
+        const len = el.textContent.trim().length;
+        if (len < bestLen) { best = el; bestLen = len; }
+      }
+    }
+    return best;
+  }
+
+  // The Confirm Units input (reactive form control "quantity", id like txt_qty7).
+  function findQtyInput() {
+    return document.querySelector('input[formcontrolname="quantity"]') ||
+           document.querySelector('input[id^="txt_qty"]');
+  }
+
+  function setNativeValue(el, val) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (setter && setter.set) setter.set.call(el, val); else el.value = val;
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Keep the Confirm Units field editable, and push any typed change into the
+  // Angular reactive-form model so the updated qty is what gets submitted.
+  function keepQtyUnlocked() {
+    const inp = findQtyInput();
+    if (!inp) return;
+    if (inp.hasAttribute('readonly') || inp.readOnly) {
+      inp.removeAttribute('readonly');
+      inp.readOnly = false;
+    }
+    if (!inp.__malpaBound) {
+      inp.__malpaBound = true;
+      // Re-fire input/change on the native setter path so ngModel/formControl
+      // registers manual edits (some builds ignore a plain keystroke on a
+      // field that was readonly at bind time).
+      inp.addEventListener('change', function () { setNativeValue(inp, inp.value); });
+      console.log(TAG, 'qty field editable + bound');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3. FIND THE CURRENTLY-LOADED JOB
+  // ---------------------------------------------------------------------------
+  function currentJob() {
+    const rows = Object.values(jobsById);
+    if (!rows.length) return null;
+
+    // Best: the job the assign call told us about.
+    if (currentJobId != null) {
+      const r = rows.find(x => x.job_id === currentJobId || (x.job && x.job.id === currentJobId));
+      if (r) return r;
+    }
+    // Fallback: match the From Location shown on screen.
+    const fromCode = valueOf(findByLabel('From Location :'), 'From Location :');
+    if (fromCode) {
+      const r = rows.find(x => x.fromLocation && x.fromLocation.location_code === fromCode);
+      if (r) return r;
+    }
+    // Fallback: match the Item shown on screen.
+    const itemCode = valueOf(findByLabel('Item :'), 'Item :');
+    if (itemCode) {
+      const r = rows.find(x => x.item && x.item.item_code === itemCode);
+      if (r) return r;
+    }
+    return null;
+  }
+
+  function qtyOf(row) {
+    try { if (row.job.replenishmentDetail[0].quantity != null) return row.job.replenishmentDetail[0].quantity; } catch (e) {}
+    return row.quantity;
+  }
+  function uomOf(row) {
+    try { return row.job.replenishmentDetail[0].inventory.itemUnitOfMeasure.unitOfMeasure.name || 'units'; } catch (e) {}
+    return 'units';
+  }
+
+  // ---------------------------------------------------------------------------
+  // 4. RENDER
+  // ---------------------------------------------------------------------------
+  function removeQtyLine() {
+    const l = document.getElementById(QTY_ID);
+    if (l) l.remove();
+  }
+
+  function sync() {
+    try {
+      keepQtyUnlocked();
+
+      const anchor = findContainer('Description :') || findContainer('From Location :') || findContainer('Item :');
+      if (!anchor) { removeQtyLine(); return; }
+
+      const row = currentJob();
+      if (!row) {
+        if (Object.keys(jobsById).length) console.log(TAG, 'no matching job yet');
+        removeQtyLine();
+        return;
+      }
+
+      const key = String(row.id);
+      const existing = document.getElementById(QTY_ID);
+      if (existing && existing.dataset.key === key && document.contains(existing)) return;
+      if (existing) existing.remove();
+
+      const qty = qtyOf(row);
+      const uom = uomOf(row);
+      const toLoc = (row.toLocation && row.toLocation.location_code) || '';
+      const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+      // Wrapper is display:contents so the two rows sit in flow exactly like the
+      // native fields; each row reuses C7's own .form-group markup + <strong> so
+      // it inherits the site's colour, weight and spacing (no custom styling).
+      const line = document.createElement('div');
+      line.id = QTY_ID;
+      line.dataset.key = key;
+      line.style.display = 'contents';
+      line.innerHTML =
+        '<div class="form-group ng-star-inserted">Qty to move : <strong>' + esc(qty) + ' \u00D7 ' + esc(uom) + '</strong></div>' +
+        (toLoc ? '<div class="form-group ng-star-inserted">To Location : <strong>' + esc(toLoc) + '</strong></div>' : '');
+
+      anchor.parentNode.insertBefore(line, anchor.nextSibling);
+      console.log(TAG, 'Qty line added:', qty, uom, 'to', toLoc, '(job', row.job_id + ', item', (row.item && row.item.item_code) + ')');
+    } catch (e) {
+      console.warn(TAG, 'sync error', e);
+    }
+  }
+
+  new MutationObserver(sync).observe(document.body, { childList: true, subtree: true });
+  setInterval(sync, 600);
+  sync();
+  console.log(TAG, 'observer + poll running');
 })();
