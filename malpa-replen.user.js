@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa C7 - Replen Early Qty
 // @namespace    malpa
-// @version      4.1
+// @version      4.2
 // @description  Shows replenishment qty-to-move + To Location before scanning, and keeps the Confirm Units field editable so a changed qty is submitted.
 // @match        https://malpa.canary7.com/*
 // @grant        none
@@ -124,29 +124,16 @@
            document.querySelector('input[id^="txt_qty"]');
   }
 
-  function setNativeValue(el, val) {
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-    if (setter && setter.set) setter.set.call(el, val); else el.value = val;
-    el.dispatchEvent(new Event('input',  { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  // Keep the Confirm Units field editable, and push any typed change into the
-  // Angular reactive-form model so the updated qty is what gets submitted.
+  // Keep the Confirm Units field editable. Typing fires the input's native
+  // input/change events, which Angular's reactive form already listens to, so
+  // the edited qty is submitted without any extra event dispatching from us.
   function keepQtyUnlocked() {
     const inp = findQtyInput();
     if (!inp) return;
     if (inp.hasAttribute('readonly') || inp.readOnly) {
       inp.removeAttribute('readonly');
       inp.readOnly = false;
-    }
-    if (!inp.__malpaBound) {
-      inp.__malpaBound = true;
-      // Re-fire input/change on the native setter path so ngModel/formControl
-      // registers manual edits (some builds ignore a plain keystroke on a
-      // field that was readonly at bind time).
-      inp.addEventListener('change', function () { setNativeValue(inp, inp.value); });
-      console.log(TAG, 'qty field editable + bound');
+      if (!inp.__malpaUnlocked) { inp.__malpaUnlocked = true; console.log(TAG, 'qty field editable'); }
     }
   }
 
