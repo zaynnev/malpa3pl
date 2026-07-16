@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pack v3
 // @namespace    https://malpa.canary7.com
-// @version      3.3.78
+// @version      3.3.79
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pack.user.js
 // @description  High-throughput packing station for Canary7 WMS — optimistic scanning, async API queue, dynamic profiles
@@ -4802,6 +4802,14 @@ color: #b91c1c;
         || closeResp?.shipmentHeader?.consignment_id
         || ShipmentCache.shipmentHeader?.consignment_id;
 
+      // Capture the shipment number NOW, while ShipmentCache is still populated.
+      // The consign-error catch below fires asynchronously — often AFTER
+      // resetForNextTote() has cleared the cache (especially on MIBP, where the
+      // retained-tote auto-load races the label calls). Reading the cache inside
+      // the catch returned undefined and fell back to consId — which is how the
+      // consignment ID ended up in the shipment badge. Never fall back to consId.
+      const shipNoForBadge = ShipmentCache.shipmentHeader?.shipment_number || null;
+
       // Start post-close work only after close-to-container has completed so C7 has
       // committed final weight/dimensions. For SIBP, move back to the item-scan
       // screen immediately but keep scanning locked until this promise settles.
@@ -4838,7 +4846,7 @@ color: #b91c1c;
         const postCloseCallsReady = startPostCloseConsigning(consId, closeResp);
         EventLog.ok('All items packed — label printing.');
         postCloseCallsReady.catch(err => {
-          const shipNo = ShipmentCache.shipmentHeader?.shipment_number || consId;
+          const shipNo = shipNoForBadge || ShipmentCache.shipmentHeader?.shipment_number || '—';
           updateShipBadge(shipNo, true);
           setFinalising(false);
           unlockScanAfterFinalising();
