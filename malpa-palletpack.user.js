@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pallet Pack
 // @namespace    malpa
-// @version      1.4.1
+// @version      1.6.1
 // @match        https://*.canary7.com/*
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-palletpack.user.js
@@ -277,6 +277,7 @@
       containerNo: null,
       containerTypeId: null,
       lines: new Map(),          // item_id -> base units placed in THIS box
+      unexpected: new Map(),     // UPPER(barcode) -> count of unexpected scans in THIS box
       weight: null, length: null, width: null, height: null,
     };
   }
@@ -287,6 +288,7 @@
     items: new Map(),            // item_id -> { itemCode, description, requiredBase, scannedBase, unitWeight }
     barcodeIndex: new Map(),     // UPPER(barcode) -> { itemId, factor, uomId }
     unexpected: new Map(),       // UPPER(barcode) -> count
+    unexpectedResolved: new Map(), // UPPER(barcode) -> { itemCode, description } | { unknown:true }
     containers: [],              // finalised Container boundaries
     current: null,               // the box being filled now
 
@@ -296,6 +298,7 @@
       this.items = new Map();
       this.barcodeIndex = new Map();
       this.unexpected = new Map();
+      this.unexpectedResolved = new Map();
       this.containers = [];
       this.current = newContainer(1);
     },
@@ -303,6 +306,7 @@
     resetScans() {
       for (const it of this.items.values()) it.scannedBase = 0;
       this.unexpected = new Map();
+      this.unexpectedResolved = new Map();
       this.containers = [];
       this.current = newContainer(1);
     },
@@ -573,6 +577,73 @@
     return 0;
   }
 
+  // ---------------------------------------------------------------------------
+  // 7b. BARCODE → ITEM LOOKUP  (for unexpected scans — display the real item code
+  //     instead of the raw barcode). Uses the C7 item endpoint with ?reference=,
+  //     which resolves any UPC/EAN/reference to its item. This is READ-ONLY and is
+  //     only ever called when building the mismatch / view-scanned report — never
+  //     during scanning, so it can't leak correctness to the blind operator.
+  // ---------------------------------------------------------------------------
+  // NB: served from the app origin (malpa.canary7.com), a REST path — NOT the
+  // stgauth index.php?r= base the packing calls use. Same auth headers apply.
+  const ITEM_LOOKUP_BASE = 'https://malpa.canary7.com/general/api/wms/v1/item';
+  async function lookupItemByReference(barcode) {
+    await waitForSession();
+    const url = ITEM_LOOKUP_BASE +
+      '?expand=company,item_group&per-page=5&page=1&sort=item_code' +
+      '&fields=id,item_code,description,long_description,status,commodity_code,company.company_code,item_group.name' +
+      '&reference=' + encodeURIComponent(barcode);
+    const res = await fetch(url, { method: 'GET', headers: mkHeaders() });
+    if (res.status === 401) { _showSessionExpired(); throw new Error('Session expired'); }
+    if (!res.ok) throw new Error('Item lookup error ' + res.status);
+    const data = await res.json();
+    const arr = Array.isArray(data) ? data : (data?.items || []);
+    return arr[0] || null;
+  }
+  const _unexpectedLookups = new Map();   // UPPER(barcode) -> in-flight Promise (dedupe)
+  function resolveUnexpected(barcode) {
+    const key = String(barcode || '').toUpperCase();
+    if (Cache.unexpectedResolved.has(key)) return Promise.resolve(Cache.unexpectedResolved.get(key));
+    if (_unexpectedLookups.has(key)) return _unexpectedLookups.get(key);
+    const p = lookupItemByReference(key)
+      .then(item => {
+        const resolved = item
+          ? { itemCode: item.item_code, description: item.description || item.long_description || '' }
+          : { unknown: true };
+        Cache.unexpectedResolved.set(key, resolved);
+        _unexpectedLookups.delete(key);
+        return resolved;
+      })
+      .catch(err => {
+        _unexpectedLookups.delete(key);
+        WARN('barcode lookup failed for', key, '—', err.message);
+        return { unknown: true };   // fall back to showing the raw barcode
+      });
+    _unexpectedLookups.set(key, p);
+    return p;
+  }
+  // Patch every unexpected row inside `scope` (a rendered modal): swap the raw
+  // barcode label for the resolved item code once the lookup returns. Falls back to
+  // the barcode when C7 can't resolve it.
+  function resolveUnexpectedRows(scope) {
+    if (!scope) return;
+    scope.querySelectorAll('[data-unex]').forEach(row => {
+      const code = row.getAttribute('data-unex');
+      const label = row.querySelector('.mpp-unex-label');
+      if (!label) return;
+      resolveUnexpected(code).then(r => {
+        if (!document.contains(label)) return;
+        if (r && !r.unknown && r.itemCode) {
+          label.innerHTML = `<b>${_esc(r.itemCode)}</b>` +
+            (r.description ? ' ' + _esc(r.description) : '') +
+            ` <span class="mpp-vs-uom-f">(not on this shipment)</span>`;
+        } else {
+          label.innerHTML = `${_esc(code)} <span class="mpp-vs-uom-f">(unknown barcode)</span>`;
+        }
+      });
+    });
+  }
+
   // ===========================================================================
   // 8. SCAN HANDLING  (guide §9 — client-side only, never fires an API call)
   // ===========================================================================
@@ -590,9 +661,12 @@
       if (it) it.scannedBase += hit.factor;
       Cache.current.lines.set(hit.itemId, (Cache.current.lines.get(hit.itemId) || 0) + hit.factor);
     } else {
-      // Unknown — record as unexpected, but give the SAME success feedback (stay
-      // blind, never signal wrong). Guarantees Finish fails. (guide decision #2)
+      // Unknown — record as unexpected. Track it BOTH shipment-wide (for the Finish
+      // report, which it guarantees fails) AND in the current box, so it counts toward
+      // this container's units and can be unverified. Same success feedback (stay
+      // blind, never signal wrong). (guide decision #2)
       Cache.unexpected.set(code, (Cache.unexpected.get(code) || 0) + 1);
+      Cache.current.unexpected.set(code, (Cache.current.unexpected.get(code) || 0) + 1);
     }
     // Identical feedback for hit and miss — do NOT leak correctness
     Audio.chime('scan');
@@ -609,149 +683,98 @@
 
   const _SCAN_SCREENS = { SHIPMENT_ENTRY: 'mpp-ship-in', SCAN: 'mpp-scan-in' };
 
-  // TC51 sidebar state + the native tab/pane active before we opened (restored on close).
-  let _mppSidebarWasMin = false;
-  let _mppBrandWasMin   = false;
-  let _prevActiveLi     = null;
-  let _prevActivePanel  = null;
+  // ── True-tab shell ────────────────────────────────────────────────────────
+  // Pallet Pack lives as a FIXED overlay pinned to the C7 content area (below the tab
+  // bar, right of the sidebar). We NEVER touch C7's own tabs or panes — clicking a
+  // native tab just HIDES our overlay (C7 shows its content underneath); clicking our
+  // tab chip or the sidebar launcher SHOWS it again with all state intact. Because we
+  // never mutate C7's DOM, there is no tab "bounce" and no blank native menus. The only
+  // real teardown is × / Esc → closeUI().
+  let _mppRepositionObserver = null;
 
-  // Height = window height minus our top offset. Width needs no JS — the panel is a
-  // native .tab-pane in C7's flow, so it fills the content area and reflows when the
-  // sidebar collapses. (Mirrors malpa-pick.user.js measureHeight.)
-  function measureHeight() {
-    const panel = document.getElementById('mpp-root');
-    if (!panel) return;
-    const rect = panel.getBoundingClientRect();
-    const available = Math.floor(window.innerHeight - rect.top);
-    if (available > 100) {
-      panel.style.height    = available + 'px';
-      panel.style.maxHeight = available + 'px';
-      panel.style.minHeight = available + 'px';
-    }
+  // Pin the overlay to the content area: top = bottom of the C7 tab bar, left = right
+  // edge of the sidebar. Recomputed on show, on resize, and whenever the sidebar
+  // collapses/expands (it toggles a <body> class — watched by a MutationObserver).
+  function positionRoot() {
+    const r = document.getElementById('mpp-root');
+    if (!r || r.style.display === 'none') return;
+    const sidebar = document.querySelector('div.sidebar, .sidebar');
+    const tabBar  = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+    let top = 0, left = 0;
+    if (tabBar)  { const b = tabBar.getBoundingClientRect();  if (b.bottom > 0 && b.bottom < window.innerHeight) top  = Math.round(b.bottom); }
+    if (sidebar) { const b = sidebar.getBoundingClientRect(); if (b.right  > 0 && b.right  < window.innerWidth)  left = Math.round(b.right); }
+    r.style.top = top + 'px'; r.style.left = left + 'px'; r.style.right = '0px'; r.style.bottom = '0px';
   }
 
-  function _deactivateNative(tabBar, tabContent) {
-    tabBar.querySelectorAll('li.nav-item').forEach(li => {
-      if (li.id === 'mpp-tab-li') return;
-      li.classList.remove('active');
-      const a = li.querySelector('a.nav-link');
-      if (a) { a.classList.remove('active'); a.setAttribute('aria-selected', 'false'); }
-    });
-    tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane').forEach(p => {
-      if (p.id === 'mpp-root') return;
-      p.classList.remove('active');
-      p.style.display = 'none';
-    });
-  }
-
-  // On close, clear the inline display:none we put on EVERY native pane so C7's own
-  // .active class controls visibility again — otherwise any native tab whose pane we
-  // hid stays blank when the operator later opens it. (More thorough than Pick, which
-  // only restores the single previously-active pane.)
-  function _unsuppressNativePanes() {
-    const tabContent = document.querySelector('div.tab-content');
-    if (!tabContent) return;
-    tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane').forEach(p => {
-      if (p.id === 'mpp-root') return;
-      p.style.display = '';
-    });
-  }
-  function _restoreSidebar() {
-    if (!_mppSidebarWasMin) document.body.classList.remove('sidebar-minimized');
-    if (!_mppBrandWasMin)   document.body.classList.remove('brand-minimized');
-  }
-
-  // Pallet Pack is MODAL, exactly like malpa-pick: either open (this pane fills the C7
-  // content area) or closed. There is NO "step aside when a native tab is clicked"
-  // behaviour — that half-hidden state is what blanked the native menus. The only exit
-  // is the tab × or Esc → closeUI(), which restores the prior tab + pane.
-  function openUI() {
-    if (document.getElementById('mpp-root')) { _refocusScanInput(); return; }  // double-open guard
-    injectCSS();
-
-    const tabBar     = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
-    const tabContent = document.querySelector('div.tab-content');
-    if (!tabBar || !tabContent) { WARN('Could not find C7 tab bar or tab content.'); return; }
-
-    // Remember what was active so closeUI() restores it exactly.
-    const prevLi    = tabBar.querySelector('li.nav-item.active');
-    const prevPanel = tabContent.querySelector(':scope > .tab-pane.active, :scope > tab.active');
-    if (prevLi)    _prevActiveLi    = prevLi;
-    if (prevPanel) _prevActivePanel = prevPanel;
-
-    // Tab chip in C7's tab bar.
+  // Ensure our "Pallet Pack" chip is in the C7 tab bar (re-added if Angular re-rendered
+  // the bar while we were backgrounded). Clicking the body shows us; the × closes us.
+  function ensureTabChip() {
+    const tabBar = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
+    if (!tabBar || document.getElementById('mpp-tab-li')) return;
     const li = document.createElement('li');
     li.id = 'mpp-tab-li';
-    li.className = 'nav-item ng-star-inserted active';
+    li.className = 'nav-item ng-star-inserted';
     const a = document.createElement('a');
-    a.className = 'nav-link active';
+    a.className = 'nav-link';
     a.href = 'javascript:void(0);';
     a.setAttribute('role', 'tab');
-    a.setAttribute('aria-selected', 'true');
     a.innerHTML = '<span class="mpp-tab-label">Pallet Pack</span>' +
                   '<span class="mpp-tab-x" title="Close Pallet Pack">×</span>';
     a.addEventListener('click', (e) => {
-      // Body click is a no-op (we're already the active view); only × closes.
       e.preventDefault();
       if (e.target.closest('.mpp-tab-x')) { e.stopPropagation(); confirmClose(); }
+      else showPalletPack();
     });
     li.appendChild(a);
     tabBar.appendChild(li);
+  }
 
-    // Panel as a native .tab-pane inside tab-content — THIS is what fills the screen.
+  // Show our overlay (bring Pallet Pack to the front). State is untouched.
+  function showPalletPack() {
+    const r = document.getElementById('mpp-root');
+    if (!r) return;
+    ensureTabChip();
+    r.style.display = 'flex';
+    const chip = document.getElementById('mpp-tab-li');
+    chip?.classList.add('active');
+    chip?.querySelector('a.nav-link')?.classList.add('active');
+    positionRoot();
+    setTimeout(_refocusScanInput, 60);
+  }
+
+  // Hide our overlay so C7's own tab content shows. Session stays alive in the DOM.
+  function hidePalletPack() {
+    const r = document.getElementById('mpp-root');
+    if (!r) return;
+    r.style.display = 'none';
+    const chip = document.getElementById('mpp-tab-li');
+    chip?.classList.remove('active');
+    chip?.querySelector('a.nav-link')?.classList.remove('active');
+  }
+
+  function openUI() {
+    if (document.getElementById('mpp-root')) { showPalletPack(); return; }  // re-show existing session
+    injectCSS();
     const overlay = document.createElement('div');
     overlay.id = 'mpp-root';
-    overlay.className = 'mpp-root tab-pane active';
-    overlay.style.display = 'flex';   // inline beats any C7 .tab-pane.active{display:block}
-    tabContent.appendChild(overlay);
-
-    _deactivateNative(tabBar, tabContent);
-
-    // Minimise the C7 sidebar for max TC51 space; store prior state to restore later.
-    _mppSidebarWasMin = document.body.classList.contains('sidebar-minimized');
-    _mppBrandWasMin   = document.body.classList.contains('brand-minimized');
-    document.body.classList.add('sidebar-minimized', 'brand-minimized');
-
+    overlay.className = 'mpp-root';
+    document.body.appendChild(overlay);
+    ensureTabChip();
     document.addEventListener('keydown', onGlobalKey, true);
-    setTimeout(measureHeight, 50);
-    window.addEventListener('resize', measureHeight);
-
+    window.addEventListener('resize', positionRoot);
+    _mppRepositionObserver = new MutationObserver(() => positionRoot());
+    _mppRepositionObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+    showPalletPack();
     if (!State.profiles.length) { initData(); renderProfileSelect('Loading profiles…'); }
     else renderProfileSelect();
   }
 
   function closeUI() {
     document.removeEventListener('keydown', onGlobalKey, true);
-    window.removeEventListener('resize', measureHeight);
-    // Restore the sidebar to its pre-open state — only undo classes we added.
-    _restoreSidebar();
-
+    window.removeEventListener('resize', positionRoot);
+    if (_mppRepositionObserver) { _mppRepositionObserver.disconnect(); _mppRepositionObserver = null; }
     document.getElementById('mpp-tab-li')?.remove();
     document.getElementById('mpp-root')?.remove();
-
-    // Clear the inline display:none we put on every native pane, so any C7 menu the
-    // operator opens next isn't stuck blank — then re-activate the prior one below.
-    _unsuppressNativePanes();
-
-    // Restore exactly the tab + pane that were active before we opened.
-    if (_prevActiveLi && document.contains(_prevActiveLi)) {
-      _prevActiveLi.classList.add('active');
-      const a = _prevActiveLi.querySelector('a.nav-link');
-      if (a) { a.classList.add('active'); a.setAttribute('aria-selected', 'true'); }
-    } else {
-      const tabBar = document.querySelector('ul.nav.nav-tabs[role="tablist"]');
-      const lastLi = tabBar && Array.from(tabBar.querySelectorAll('li.nav-item')).pop();
-      if (lastLi) { lastLi.classList.add('active'); const a = lastLi.querySelector('a.nav-link'); if (a) { a.classList.add('active'); a.setAttribute('aria-selected', 'true'); } }
-    }
-    if (_prevActivePanel && document.contains(_prevActivePanel)) {
-      _prevActivePanel.classList.add('active');
-      _prevActivePanel.style.display = '';
-    } else {
-      const tabContent = document.querySelector('div.tab-content');
-      const panels = tabContent && Array.from(tabContent.querySelectorAll(':scope > tab, :scope > .tab-pane'));
-      if (panels && panels.length) { const last = panels[panels.length - 1]; last.classList.add('active'); last.style.display = ''; }
-    }
-    _prevActiveLi = null; _prevActivePanel = null;
     resetAll();
   }
 
@@ -917,6 +940,7 @@
     if (!el) return;
     let curUnits = 0;
     for (const v of Cache.current.lines.values()) curUnits += v;
+    for (const v of Cache.current.unexpected.values()) curUnits += v;   // unexpected count too
     el.innerHTML =
       `<span class="mpp-meta-pill">This container: ${curUnits} unit${curUnits === 1 ? '' : 's'}</span>` +
       `<span class="mpp-meta-pill">Containers closed: ${Cache.containers.length}</span>`;
@@ -936,34 +960,35 @@
   function showViewScanned() {
     const r = root(); if (!r) return;
 
-    // Grouped by container: each closed box, then the open one, with a per-item UOM
-    // breakdown inside each (guide §10 "optionally grouped by container").
-    let curUnits = 0; for (const v of Cache.current.lines.values()) curUnits += v;
-    const boxes = curUnits > 0 ? [...Cache.containers, Cache.current] : [...Cache.containers];
+    // Grouped by container: each closed box, then the open one — known items AND any
+    // unexpected scans that landed in that box, with a per-item UOM breakdown (guide §10).
+    const curHas = Cache.current.lines.size > 0 || Cache.current.unexpected.size > 0;
+    const boxes = curHas ? [...Cache.containers, Cache.current] : [...Cache.containers];
 
-    // removals[] registers each editable (open-container) UOM row so its Remove
-    // button can unverify exactly one of that UOM (guide §13 correction).
+    // removals[] registers each editable (open-container) row so its Unverify button
+    // can remove exactly one unit of that UOM / unexpected barcode (guide §13).
     const removals = [];
     const groups = [];
     boxes.forEach((box, idx) => {
       const editable = box === Cache.current;   // only the open container is correctable
-      const itemRows = [];
+      const rows = [];
       for (const [id, base] of box.lines) {
         if (base <= 0) continue;
-        itemRows.push(itemScanRow(id, base, editable, removals));
+        rows.push(itemScanRow(id, base, editable, removals));
       }
-      if (!itemRows.length) return;
+      for (const [code, n] of (box.unexpected || new Map())) {
+        if (n <= 0) continue;
+        rows.push(unexpectedScanRow(code, n, editable, removals));
+      }
+      if (!rows.length) return;
       const label = `Container ${idx + 1}` +
         (box.containerNo ? ` — ${_esc(box.containerNo)}` : '') +
         (editable ? ' (open)' : '');
-      groups.push(`<div class="mpp-vs-group"><div class="mpp-vs-group-h">${label}</div>${itemRows.join('')}</div>`);
+      groups.push(`<div class="mpp-vs-group"><div class="mpp-vs-group-h">${label}</div>${rows.join('')}</div>`);
     });
 
-    const unexpectedRows = [...Cache.unexpected.entries()].map(([code, n]) =>
-      `<div class="mpp-vs-row mpp-vs-bad"><span>${_esc(code)}</span><span>×${n} (unexpected)</span></div>`);
-
-    const body = groups.length || unexpectedRows.length
-      ? groups.join('') + (unexpectedRows.length ? `<div class="mpp-vs-group"><div class="mpp-vs-group-h">Unexpected</div>${unexpectedRows.join('')}</div>` : '')
+    const body = groups.length
+      ? groups.join('')
       : '<div class="mpp-note">Nothing scanned yet.</div>';
 
     const modal = document.createElement('div');
@@ -975,6 +1000,7 @@
         <button class="mpp-btn mpp-btn-primary" id="mpp-vs-close">Close</button>
       </div>`;
     r.appendChild(modal);
+    resolveUnexpectedRows(modal);   // swap raw barcodes for their item codes
     document.getElementById('mpp-vs-close')?.addEventListener('click', () => {
       modal.remove();
       setTimeout(() => document.getElementById('mpp-scan-in')?.focus(), 40);
@@ -985,7 +1011,10 @@
       if (!btn) return;
       e.preventDefault();
       const rm = removals[Number(btn.dataset.idx)];
-      if (rm) { unverify(rm.itemId, rm.factor); modal.remove(); showViewScanned(); }
+      if (!rm) return;
+      if (rm.unexpected) unverifyUnexpected(rm.unexpected);
+      else unverify(rm.itemId, rm.factor);
+      modal.remove(); showViewScanned();
     });
   }
 
@@ -1002,6 +1031,33 @@
     if (it) it.scannedBase = Math.max(0, it.scannedBase - dec);
     updateScanScreenMeta();
     vibrate([20]);
+  }
+  // Unverify one unexpected scan from the OPEN container, keeping the shipment-wide
+  // unexpected tally (used by the Finish report) in sync. Never goes below zero.
+  function unverifyUnexpected(code) {
+    const cur = Cache.current;
+    const have = cur.unexpected.get(code) || 0;
+    if (have <= 0) return;
+    if (have - 1 <= 0) cur.unexpected.delete(code);
+    else cur.unexpected.set(code, have - 1);
+    const total = (Cache.unexpected.get(code) || 0) - 1;
+    if (total <= 0) Cache.unexpected.delete(code);
+    else Cache.unexpected.set(code, total);
+    updateScanScreenMeta();
+    vibrate([20]);
+  }
+  // An unexpected scan card: resolved item code (via data-unex/resolveUnexpectedRows,
+  // falling back to the raw barcode), the count, and — for the open box — Unverify.
+  function unexpectedScanRow(code, n, editable, removals) {
+    let rm = '';
+    if (editable) {
+      const idx = removals.push({ unexpected: code }) - 1;
+      rm = `<button class="mpp-vs-rm" data-idx="${idx}" title="Unverify one">Unverify</button>`;
+    }
+    return `<div class="mpp-vs-item" data-unex="${_esc(code)}">
+        <div class="mpp-vs-item-h mpp-unex-label">${_esc(code)}</div>
+        <div class="mpp-vs-uom"><span>×${n}</span>${rm}</div>
+      </div>`;
   }
   // One item = a small card: header (code + description, no qty), one row per UOM,
   // then a Total footer (guide §10).
@@ -1181,20 +1237,10 @@
   // 11. FINISH VERIFICATION (local match, guide §11) + mismatch reset (§13)
   // ===========================================================================
 
-  function onFinish() {
-    if (State.committing) return;                 // re-entry guard (guide §15)
-    // If the current box has scans, treat it as the final container: prompt its
-    // weight/dims first, then finish (guide §11/§15).
-    let curUnits = 0;
-    for (const v of Cache.current.lines.values()) curUnits += v;
-    if (curUnits > 0) { openCloseContainer(true); return; }
-    doFinish();
-  }
-
-  function doFinish() {
-    if (State.committing) return;
-    if (!Cache.containers.length) { toast('Close at least one container first.'); return; }
-
+  // Local total-vs-required match (guide §11). scannedBase is kept live on every
+  // scan (incl. the still-open box), so this is meaningful the moment the operator
+  // declares they're done. Returns { mismatches, unexpected, verified }.
+  function computeVerification() {
     const mismatches = [];
     for (const it of Cache.items.values()) {
       if (it.scannedBase !== it.requiredBase) {
@@ -1202,10 +1248,32 @@
       }
     }
     const unexpected = [...Cache.unexpected.entries()];
-    const verified = mismatches.length === 0 && unexpected.length === 0;
+    return { mismatches, unexpected, verified: mismatches.length === 0 && unexpected.length === 0 };
+  }
 
-    if (verified) { commit(); }
-    else { showMismatch(mismatches, unexpected); }
+  function onFinish() {
+    if (State.committing) return;                 // re-entry guard (guide §15)
+    // Verify FIRST — before the operator enters any container info. If the match
+    // fails there is no reason to key weight/dimensions, so show the report and
+    // reset straight away. Only once verification passes do we prompt for the final
+    // (open) box's info and commit (guide §11/§15).
+    const v = computeVerification();
+    if (!v.verified) { showMismatch(v.mismatches, v.unexpected); return; }
+
+    // Verified — treat the still-open box (if any) as the final container: prompt
+    // its weight/dims, then commit. Otherwise commit what's already closed.
+    let curUnits = 0;
+    for (const n of Cache.current.lines.values()) curUnits += n;
+    if (curUnits > 0) { openCloseContainer(true); return; }
+    doFinish();
+  }
+
+  function doFinish() {
+    if (State.committing) return;
+    if (!Cache.containers.length) { toast('Close at least one container first.'); return; }
+    const v = computeVerification();
+    if (v.verified) { commit(); }
+    else { showMismatch(v.mismatches, v.unexpected); }
   }
 
   function showMismatch(mismatches, unexpected) {
@@ -1216,7 +1284,7 @@
     const rows = mismatches.map(m =>
       `<div class="mpp-vs-row mpp-vs-bad"><span><b>${_esc(m.itemCode)}</b></span><span>required ${m.required}, scanned ${m.scanned}</span></div>`);
     const un = unexpected.map(([code, n]) =>
-      `<div class="mpp-vs-row mpp-vs-bad"><span>${_esc(code)}</span><span>unexpected ×${n}</span></div>`);
+      `<div class="mpp-vs-row mpp-vs-bad" data-unex="${_esc(code)}"><span class="mpp-unex-label">${_esc(code)}</span><span>unexpected ×${n}</span></div>`);
     const modal = document.createElement('div');
     modal.className = 'mpp-overlay';
     modal.innerHTML = `
@@ -1227,6 +1295,7 @@
         <button class="mpp-btn mpp-btn-primary" id="mpp-mm-ok">Reset &amp; rescan</button>
       </div>`;
     r.appendChild(modal);
+    resolveUnexpectedRows(modal);   // swap raw barcodes for their item codes
     document.getElementById('mpp-mm-ok')?.addEventListener('click', () => {
       modal.remove();
       Cache.resetScans();               // keep items + barcodeIndex (guide §13)
@@ -1517,9 +1586,11 @@
   // ===========================================================================
 
   function _refocusScanInput() {
+    const rootEl = root();
+    if (!rootEl || rootEl.style.display === 'none') return;  // closed or backgrounded
     const inputId = _SCAN_SCREENS[State.screen];
     if (!inputId) return;
-    if (root()?.querySelector('.mpp-overlay')) return;   // a modal is open
+    if (rootEl.querySelector('.mpp-overlay')) return;    // a modal is open
     const el = document.getElementById(inputId);
     if (!el || !document.contains(el)) return;
     if (document.activeElement === el) return;
@@ -1542,12 +1613,25 @@
   function attachNavClickListener() {
     if (_navClickAttached) return;
     _navClickAttached = true;
-    // Only our sidebar launcher opens the view (mirrors malpa-pick). We deliberately do
-    // NOT react to native tab / sidebar clicks: Pallet Pack is modal, so the operator
-    // closes it via the tab × or Esc; C7's own tabs are left entirely to C7.
+    // The sidebar launcher opens / re-shows Pallet Pack. A click on a native C7 tab or
+    // sidebar menu HIDES Pallet Pack (session preserved) and lets C7 navigate — the
+    // operator returns via the Pallet Pack tab chip or the launcher. We never touch
+    // C7's own tabs/panes, so nothing bounces and no native menu goes blank.
     document.addEventListener('click', (e) => {
       const nav = document.getElementById('mpp-nav');
-      if (nav && (nav === e.target || nav.contains(e.target))) { e.preventDefault(); openUI(); }
+      if (nav && (nav === e.target || nav.contains(e.target))) { e.preventDefault(); openUI(); return; }
+
+      // No active Pallet Pack session → nothing to manage.
+      if (!document.getElementById('mpp-root')) return;
+
+      // Our own tab chip handles its own clicks (show / ×).
+      if (e.target.closest('#mpp-tab-li')) return;
+
+      // Native C7 tab or sidebar menu link → just hide (do NOT preventDefault, so C7
+      // handles the navigation). Switching away is free; state is kept for return.
+      const nativeTab   = e.target.closest('ul.nav.nav-tabs[role="tablist"] a.nav-link');
+      const sidebarLink = e.target.closest('div.sidebar nav a.nav-link');
+      if (nativeTab || sidebarLink) hidePalletPack();
     }, true);
   }
 
@@ -1591,8 +1675,8 @@
     style.textContent = `
       /* Canary7-matched design tokens (same palette as Malpa Pack v3) — scoped to
          our root so we never touch C7's own :root variables.
-         The root is now a native .tab-pane inside div.tab-content (like Malpa Pick),
-         so it flows/fills automatically — position:relative, height set by JS. */
+         The root is a FIXED overlay pinned to the content area by positionRoot() — it
+         is shown/hidden (never removed) so the operator can switch C7 tabs and back. */
       .mpp-root{
         --c7-bg:#eef1f5; --c7-surf:#ffffff; --c7-surf2:#f9f9fa; --c7-surf3:#eef9fd;
         --c7-border:#e1e6ef; --c7-border2:#c0cadd; --c7-text:#394967;
@@ -1600,7 +1684,7 @@
         --c7-green:#79c447; --c7-green-bg:#eff9eb; --c7-green-bd:#bde5ae; --c7-red:#ff5454;
         --c7-font:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Roboto,sans-serif;
         --c7-mono:'SF Mono','Fira Code',Consolas,monospace; --c7-r:4px;
-        position:relative; height:calc(100vh - 55px); max-height:100vh;
+        position:fixed; z-index:100; inset:0;
         background:var(--c7-surf2); color:var(--c7-text);
         font-family:var(--c7-font); display:flex; flex-direction:column; overflow:hidden;
         animation:mpp-in .12s ease;
