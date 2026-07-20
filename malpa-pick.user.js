@@ -4,6 +4,8 @@
 // @version      4.9.0
 // @description  Picking interface for Canary7 WMS - TC51 optimised
 // @author       Malpa 3PL
+// @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pick.user.js
+// @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pick.user.js
 // @match        https://*.canary7.com/*
 // @grant        none
 // @run-at       document-idle
