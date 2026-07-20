@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa C7 - Replen Early Qty
 // @namespace    malpa
-// @version      4.2
+// @version      4.3
 // @description  Shows replenishment qty-to-move + To Location before scanning, and keeps the Confirm Units field editable so a changed qty is submitted.
 // @match        https://malpa.canary7.com/*
 // @grant        none
@@ -181,8 +181,20 @@
     if (l) l.remove();
   }
 
+  // True only on the actual Replenishment Job Execution screen (the receiving
+  // screen also shows an item description, so we gate on this card header).
+  function onReplenExecScreen() {
+    const headers = document.querySelectorAll('.card-header, .card-header strong, strong');
+    for (const h of headers) {
+      if (h.textContent.trim() === 'Replenishment Job Execution') return true;
+    }
+    return false;
+  }
+
   function sync() {
     try {
+      if (!onReplenExecScreen()) { removeQtyLine(); return; }
+
       keepQtyUnlocked();
 
       const anchor = findContainer('Description :') || findContainer('From Location :') || findContainer('Item :');
