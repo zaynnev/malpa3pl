@@ -1,9 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pick
 // @namespace    https://malpa.canary7.com
-// @version      4.8.9
-// @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pick.user.js
-// @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pick.user.js
+// @version      4.9.0
 // @description  Picking interface for Canary7 WMS - TC51 optimised
 // @author       Malpa 3PL
 // @match        https://*.canary7.com/*
@@ -3167,12 +3165,21 @@
   }
 
   // Scan keydown handler - Fragment 4 will replace _onScan with full logic
+  // Shifted number keys from TC51 scanner (e.g. $ -> 4, % -> 5)
+  // Happens when Android keyboard state has Shift stuck during focus() call
+  var _SHIFT_NUMS = {'!':'1','@':'2','#':'3','$':'4','%':'5',
+                     '^':'6','&':'7','*':'8','(':'9',')':'0'};
+
+  function _normaliseScan(val) {
+    return val.split('').map(function(c) { return _SHIFT_NUMS[c] || c; }).join('');
+  }
+
   function _onScanKeydown(e) {
     if (e.key === 'Enter' || e.keyCode === 13) {
       e.preventDefault();
-      const val = R.scanIn?.value?.trim();
-      if (val) {
-        _onScan(val);
+      var raw = R.scanIn?.value?.trim();
+      if (raw) {
+        _onScan(_normaliseScan(raw));
         if (R.scanIn) R.scanIn.value = '';
       }
     }
@@ -3300,7 +3307,7 @@
     spInput?.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' && e.keyCode !== 13) return;
       e.preventDefault();
-      const val = spInput.value.trim();
+      const val = _normaliseScan(spInput.value.trim());
       spInput.value = '';
       if (!val) return;
 
