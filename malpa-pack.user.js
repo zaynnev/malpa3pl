@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Malpa Pack v3
 // @namespace    https://malpa.canary7.com
-// @version      3.3.79
+// @version      3.3.82
 // @updateURL    https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pack.user.js
 // @downloadURL  https://raw.githubusercontent.com/zaynnev/malpa3pl/main/malpa-pack.user.js
 // @description  High-throughput packing station for Canary7 WMS — optimistic scanning, async API queue, dynamic profiles
@@ -1462,6 +1462,26 @@
 
   /** Track the last successfully consigned consignment_id for reprint */
   let _lastConsignmentId = null;
+
+  // ── v3.3.80: CONSIGN FIFO ──────────────────────────────────────────────────
+  // Packing may overlap the previous shipment's consign chain, but consign
+  // chains themselves must NEVER run concurrently: C7 handles concurrent
+  // consignments fine, yet the printer gives no ordering guarantee — two boxes
+  // on the bench with out-of-order labels risks wrong-label-on-box. All
+  // create-consignment-pieces / set-carrier-piece-no chains queue here FIFO.
+  // A failed chain keeps the queue alive (failure is surfaced separately).
+  let _consignChain = Promise.resolve();
+  function _enqueueConsign(fn) {
+    const run = _consignChain.then(() => fn());
+    _consignChain = run.catch(() => {});
+    return run;
+  }
+
+  // v3.3.80: generation counter — increments every time a new shipment loads.
+  // Async consign-failure handlers capture the generation at close time and
+  // must not touch phase/scan-lock UI if a newer shipment is already active
+  // (they still surface the error via badge/log/beep/reprint).
+  let _shipmentGen = 0;
   /** Track the job_id for the currently loaded (or blocked) container */
   let _currentJobId = null;
 
@@ -2049,6 +2069,24 @@
 .mp-dd-opt:last-child { border-bottom: none; }
 .mp-dd-opt:hover  { background: var(--c7-surf3); }
 .mp-dd-opt.active { background: var(--c7-surf2); color: var(--c7-teal); }
+
+/* ══ SKELETON LOADING ROWS (v3.3.82) ══ */
+.mp-skel-row {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px; border-bottom: 1px solid var(--c7-border);
+}
+.mp-skel {
+  background: linear-gradient(90deg, var(--c7-bg) 25%, var(--c7-surf3) 50%, var(--c7-bg) 75%);
+  background-size: 200% 100%;
+  animation: mpSkel 1.1s linear infinite;
+  border-radius: 4px;
+}
+@keyframes mpSkel { from { background-position: 200% 0 } to { background-position: -200% 0 } }
+.mp-skel-info { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.mp-skel-loading-note {
+  padding: 12px 16px; font-size: 15px; color: var(--c7-muted2);
+  display: flex; align-items: center; gap: 8px;
+}
 
 /* ══ INFO CARDS ══ */
 .mp-card {
@@ -3855,6 +3893,7 @@ color: #b91c1c;
     if (!itemCode || !Session.sibpSourceContainerNo) return;
     if (R.scanIn) R.scanIn.value = '';
     setStatus(`Finding shipment for ${itemCode}…`, 'loading');
+    renderLoadingItems(itemCode); // v3.3.82 — instant visual feedback
     try {
       const data = await fetchPackContainer(Session.sibpSourceContainerNo, Session.profileId, itemCode);
       const containers = Array.isArray(data) ? data : [data];
@@ -3863,6 +3902,7 @@ color: #b91c1c;
       ShipmentCache.clear();
       ShipmentCache.loadFromGPC(containers);
       ShipmentCache.sourceContainerNo = Session.sibpSourceContainerNo;
+      _shipmentGen++; // v3.3.80 — a new shipment is now active
 
       // Update ship badge with the real shipment number now that GPC has resolved
       updateShipBadge(ShipmentCache.shipmentHeader?.shipment_number || Session.sibpSourceContainerNo);
@@ -3883,6 +3923,7 @@ color: #b91c1c;
       beep('err');
       shakeStatus();
       Session.phase = 'SIBP_ITEM_SCAN';
+      renderItems(''); // v3.3.82 — clear loading skeletons on failure
       if (R.scanIn) R.scanIn.focus();
     }
   }
@@ -4005,6 +4046,15 @@ color: #b91c1c;
     EventLog.clear(); // clear log only when a new tote is scanned, not on consign
     renderItems('');
 
+    // v3.3.80: prefetch the first container number in parallel with GPC.
+    // Later containers are already prefetched by _revealPackingUI; this covers
+    // the first container after script load (saves ~0.7s, HAR-measured).
+    if (Workflow.autoGenerateContainer() && !Session._nextContainerNo) {
+      autoGenerateContainerNumber()
+        .then(no => { Session._nextContainerNo = no; })
+        .catch(() => {});
+    }
+
     if (Workflow.usesItemInitiatedFlow()) {
       Session.sibpSourceContainerNo = String(containerNo || '').trim();
       Session.sibpProcessing = false;
@@ -4027,6 +4077,7 @@ color: #b91c1c;
     }
 
     setStatus(`Loading ${containerNo}…`, 'loading');
+    renderLoadingItems(containerNo); // v3.3.82 — instant visual feedback
     R.toteBtn.disabled = true;
     // Lock profile + location so re-firing during active session is prevented
     if (R.profSel) R.profSel.disabled = true;
@@ -4052,20 +4103,31 @@ color: #b91c1c;
 
       ShipmentCache.loadFromGPC(containers);
       ShipmentCache.sourceContainerNo = containerNo;
+      _shipmentGen++; // v3.3.80 — a new shipment is now active
 
       // Now we have the shipmentHeaderId — fetch open containers for this shipment
       const shipmentHeaderId = ShipmentCache.shipmentHeader?.id;
-      const openContainers = shipmentHeaderId
-        ? await fetchOpenOutboundContainersForShipment(shipmentHeaderId)
-        : [];
 
       // Self-heal abandoned sessions: empty closed (status 7) containers hold
       // stranded weights for units the operator is about to re-verify. Remove
       // them now so the shipment's declared weight cannot inflate. Runs in the
       // background — never blocks the operator.
+      // v3.3.80: kicked off BEFORE awaiting the open-container check so both
+      // requests run in parallel instead of back-to-back (HAR showed them
+      // serialised at ~750ms each).
       if (shipmentHeaderId) {
         cleanupEmptyClosedContainers(shipmentHeaderId).catch(() => {});
       }
+
+      // v3.3.81: start the open-container check now but DON'T await it yet —
+      // the items list only needs GPC data, so it renders first (operators
+      // reported 2-3s tote-scan-to-items; this puts items on screen at GPC
+      // time). The result is awaited below, before container create/reuse.
+      // fetchOpenOutboundContainersForShipment never rejects (returns [] on
+      // error), so holding the un-awaited promise is safe.
+      const openContainersPromise = shipmentHeaderId
+        ? fetchOpenOutboundContainersForShipment(shipmentHeaderId)
+        : Promise.resolve([]);
       SourceToteCache.ingestFromGPC(containerNo, containers);
       if (Workflow.usesRetainedSourceFlow()) {
         loadToteInventoryDetailsInBackground(containerNo, {
@@ -4118,12 +4180,14 @@ color: #b91c1c;
         await showMultiToteModal(allToteNos, containerNo);
       }
 
+      const openContainers = await openContainersPromise; // v3.3.81
       await initiateContainerCreation(openContainers);
       perfMark('tote load to packing ready', t0, containerNo);
       return true;
     } catch (err) {
       setStatus(`Load error: ${err.message}`, 'err');
       EventLog.err(`Load error: ${err.message}`);
+      renderItems(''); // v3.3.82 — clear loading skeletons on failure
       beep('err');
       // Re-enable controls so operator can retry
       if (R.profSel) R.profSel.disabled = false;
@@ -4730,6 +4794,7 @@ color: #b91c1c;
 
   async function onCloseContainer() {
     const t0 = perfNow();
+    const genAtClose = _shipmentGen; // v3.3.80 — see _shipmentGen
     if (!Session.outboundContainer) { setStatus('No container open.', 'err'); return; }
     if (_requiresClosePrompt() && !_dimsReady()) {
       const hasRemaining = ShipmentCache.pendingItems.length > 0;
@@ -4843,20 +4908,28 @@ color: #b91c1c;
       } else {
         // Final close — all items packed. Now consign and print label.
         setFinalising(true, 'All items packed — printing label…');
-        const postCloseCallsReady = startPostCloseConsigning(consId, closeResp);
+        // v3.3.80: consign chain goes through the FIFO queue so it can never
+        // run concurrently with (or print ahead of) another shipment's chain.
+        const postCloseCallsReady = _enqueueConsign(() => startPostCloseConsigning(consId, closeResp));
         EventLog.ok('All items packed — label printing.');
         postCloseCallsReady.catch(err => {
-          const shipNo = shipNoForBadge || ShipmentCache.shipmentHeader?.shipment_number || '—';
+          // Always surface the failure loudly — badge, log, beep, reprint —
+          // even if the operator has already moved on to the next shipment.
+          const shipNo = shipNoForBadge || '—';
           updateShipBadge(shipNo, true);
-          setFinalising(false);
-          unlockScanAfterFinalising();
-          Session.phase = 'COMPLETE';
           const msg = err.message || 'Unknown error';
           setStatus(`⚠ Label failed for ${shipNo}: ${msg}. Fix the shipment in C7 then use ⟳ Reprint.`, 'err');
-          EventLog.err(`Consign failed: ${msg}`);
+          EventLog.err(`Consign failed for ${shipNo}: ${msg}`);
           beep('err');
           if (R.reprintBtn && consId) { R.reprintBtn.disabled = false; }
-          if (R.btnClose) { R.btnClose.disabled = true; R.btnClose.style.opacity = '.55'; }
+          // v3.3.80: state/UI mutations only if no newer shipment has loaded —
+          // otherwise these would clobber the shipment the operator is packing.
+          if (_shipmentGen === genAtClose) {
+            setFinalising(false);
+            unlockScanAfterFinalising();
+            Session.phase = 'COMPLETE';
+            if (R.btnClose) { R.btnClose.disabled = true; R.btnClose.style.opacity = '.55'; }
+          }
         });
         resetForNextTote(postCloseCallsReady, t0);
       }
@@ -5122,16 +5195,15 @@ color: #b91c1c;
       R.toteIn.focus();
       if (_autoReloadAfterClose && retained) {
         _autoReloadAfterClose = false;
-        setStatus('✓ Shipment complete — waiting for close/consigning calls before loading next MIBP item…', 'ok');
-        Promise.resolve(postCloseCallsReady)
-          .then(() => maybeAutoLoadRetainedTote('after-close'))
-          .catch(err => {
-            const msg = err.message || 'Unknown error';
-            setStatus(`⚠ Label generation failed: ${msg} — use ⟳ Reprint before scanning next tote.`, 'err');
-            EventLog.err(`Label generation failed: ${msg}`);
-            beep('err');
-            if (R.reprintBtn) R.reprintBtn.disabled = false;
-          });
+        // v3.3.80: OVERLAP — load the next shipment immediately instead of
+        // waiting ~8s for the previous shipment's consign/label chain. The
+        // chain runs behind the operator; the consign FIFO guarantees chains
+        // never run concurrently or print out of order, and a label failure
+        // is surfaced by the onCloseContainer handler (badge + log + beep +
+        // ⟳ Reprint) even while the next shipment is being packed.
+        setStatus('✓ Shipment complete — label printing in background, loading next shipment…', 'ok');
+        Promise.resolve(postCloseCallsReady).catch(() => {}); // surfaced upstream
+        maybeAutoLoadRetainedTote('after-close');
       } else if (shouldRetain && retained) {
         // If retaining but not auto-loading, select all text so operator can overwrite or press Load
         R.toteIn.select();
@@ -5199,6 +5271,34 @@ color: #b91c1c;
    * Simpler and bug-free compared to surgical patching;
    * performance is more than adequate for typical shipment sizes (<200 lines).
    */
+  /**
+   * renderLoadingItems — v3.3.82 perceived-speed skeleton.
+   * Shown the instant a tote/item is scanned, replaced by renderItems() when
+   * GPC returns. Purely visual — the operator sees immediate feedback instead
+   * of a dead panel during the ~1-2s GPC round-trip.
+   */
+  function renderLoadingItems(label = '') {
+    if (!R.list) return;
+    R.list.innerHTML = '';
+    const note = h('div', { cls: 'mp-skel-loading-note' },
+      `Loading shipment${label ? ` for ${label}` : ''}…`);
+    R.list.append(note);
+    for (let i = 0; i < 4; i++) {
+      const row  = h('div', { cls: 'mp-skel-row' });
+      const info = h('div', { cls: 'mp-skel-info' });
+      const name = h('div', { cls: 'mp-skel' });
+      name.style.cssText = `height:16px;width:${55 + (i * 7) % 25}%`;
+      const sku  = h('div', { cls: 'mp-skel' });
+      sku.style.cssText = `height:12px;width:${22 + (i * 5) % 14}%`;
+      info.append(name, sku);
+      const qty = h('div', { cls: 'mp-skel' });
+      qty.style.cssText = 'height:28px;width:64px;flex-shrink:0';
+      row.append(info, qty);
+      R.list.append(row);
+    }
+    if (R.rhCnt) R.rhCnt.textContent = '…';
+  }
+
   function renderItems(filter = '') {
     if (!R.list) return;
     const fl     = (filter || '').toLowerCase();
