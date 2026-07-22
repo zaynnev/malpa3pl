@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Malpa C7 - Replen Early Qty
 // @namespace    malpa
-// @version      4.4
-// @description  Shows replen qty + To Location before scanning; keeps Confirm Units editable but re-checks available stock (get-unallocated-inventory) at execute and blocks over-moves.
+// @version      4.5
+// @description  Shows replen qty + To Location before scanning; keeps Confirm Units editable but blocks over-moves (available-stock check) and fractional UOM conversions at execute.
 // @match        https://malpa.canary7.com/*
 // @grant        none
 // @homepageURL  https://github.com/zaynnev/malpa3pl
@@ -169,6 +169,36 @@
     return null;
   }
 
+  // Pack/UOM-conversion check. These replens can convert between units of
+  // measure; if (qty x fromFactor) isn't divisible by toFactor the conversion
+  // lands on a fraction, creating inventory that can't be booked out via GUI.
+  function gcd(a, b) { a = Math.abs(a); b = Math.abs(b); while (b) { const t = b; b = a % b; a = t; } return a || 1; }
+
+  function uomFactor(row, uomId) {
+    try {
+      const hit = (row.item.itemUnitOfMeasures || []).find(u => u.id === uomId);
+      if (hit && typeof hit.factor === 'number') return hit.factor;
+    } catch (e) {}
+    return null;
+  }
+
+  function packCheck(row, qty) {
+    const rd = row && row.job && row.job.replenishmentDetail && row.job.replenishmentDetail[0];
+    if (!rd) return { ok: true };
+    const fromF = uomFactor(row, rd.from_unit_of_measure);
+    const toF = uomFactor(row, rd.to_unit_of_measure);
+    if (!(fromF > 0) || !(toF > 0)) {
+      console.warn(TAG, 'pack factors indeterminate — divisibility not checked', { fromF, toF });
+      return { ok: true }; // fail open for THIS rule only (availability guard still fails closed)
+    }
+    const base = qty * fromF;
+    const resultInTo = base / toF;
+    const ok = base % toF === 0;
+    const step = toF / gcd(fromF, toF);
+    console.log(TAG, 'packCheck qty', qty, 'fromF', fromF, 'toF', toF, '=> toUnits', resultInTo, ok ? 'OK' : 'BLOCK', '| step', step);
+    return { ok, fromF, toF, resultInTo, step };
+  }
+
   // Live call, at execute time, to the same endpoint C7 uses.
   function fetchAvailable(invId) {
     const url = 'https://stgauth.canary7.com/index.php?r=inventory/inventory/get-unallocated-inventory&inventory_id=' + encodeURIComponent(invId);
@@ -237,6 +267,16 @@
 
     if (inFlight) return;
 
+    // 1) UOM divisibility — local, cheapest, catches fractional conversions.
+    const pk = packCheck(row, qty);
+    if (!pk.ok) {
+      const shown = Math.round(pk.resultInTo * 100) / 100;
+      showError('UOM conversion: ' + qty + ' would become ' + shown + ' target units (not whole). Enter a multiple of ' + pk.step + '.');
+      inp.focus(); if (inp.select) inp.select();
+      return;
+    }
+
+    // 2) Availability — live call to C7's own guard.
     if (invId == null) {
       // Can't identify the inventory to check. Only let through the known-safe
       // planned quantity; block anything above it.
